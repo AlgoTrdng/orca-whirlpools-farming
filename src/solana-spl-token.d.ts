@@ -1,4 +1,4 @@
-import { PublicKey } from '@solana/web3.js'
+import { PublicKey, TransactionInstruction } from '@solana/web3.js'
 
 declare module '@solana/spl-token' {
 	export function getAssociatedTokenAddressSync(
@@ -22,4 +22,21 @@ declare module '@solana/spl-token' {
 		closeAuthorityOption: 1 | 0
 		closeAuthority: PublicKey
 	}
+
+	export function createAssociatedTokenAccountInstruction(
+		payer: PublicKey,
+		associatedToken: PublicKey,
+		owner: PublicKey,
+		mint: PublicKey,
+		programId?: PublicKey,
+		associatedTokenProgramId?: PublicKey,
+	): TransactionInstruction
+
+	export function createCloseAccountInstruction(
+		account: PublicKey,
+		destination: PublicKey,
+		authority: PublicKey,
+		multiSigners?: Signer[],
+		programId?: PublicKey,
+	): TransactionInstruction
 }

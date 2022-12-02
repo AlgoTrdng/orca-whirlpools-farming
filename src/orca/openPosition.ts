@@ -155,7 +155,7 @@ export const openPosition = async ({
 	// Get deposit amounts
 	const increaseLiquidityInput = increaseLiquidityQuoteByInputToken(
 		whirlpoolData.tokenMintB,
-		new Decimal(20),
+		new Decimal(1),
 		tickLowerBoundary,
 		tickUpperBoundary,
 		SLIPPAGE_TOLERANCE,
