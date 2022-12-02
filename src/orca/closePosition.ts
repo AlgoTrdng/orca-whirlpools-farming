@@ -22,13 +22,7 @@ import {
 	SOL_USDC_WHIRLPOOL_ADDRESS,
 	USDC_MINT,
 } from '../constants.js'
-import {
-	connection,
-	ctx,
-	fetcher,
-	solATAddress,
-	usdcATAddress,
-} from '../global.js'
+import { connection, ctx, fetcher, solATAddress, usdcATAddress } from '../global.js'
 import { parsePostTransactionBalances } from '../solana/parseTransaction.js'
 import { retryOnThrow } from '../utils/retryOnThrow.js'
 import { sendTxAndRetryOnFail } from '../utils/sendTxAndRetryOnFail.js'
@@ -119,7 +113,7 @@ export const closePosition = async ({ positionAddress, whirlpool }: ClosePositio
 	tx.add(
 		...updateFeesAndRewardsIxs,
 		// Create wrapped Sol account
-    // TODO: Check if both accounts exist and create accounts depending on result
+		// TODO: Check if both accounts exist and create accounts depending on result
 		createAssociatedTokenAccountInstruction(
 			ctx.wallet.publicKey,
 			solATAddress,
@@ -228,5 +222,5 @@ export const closePosition = async ({ positionAddress, whirlpool }: ClosePositio
 		mints: [SOL_MINT, USDC_MINT],
 		meta,
 	})
-  return parsed
+	return parsed
 }

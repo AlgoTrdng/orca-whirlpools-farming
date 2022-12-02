@@ -16,7 +16,7 @@ export const sendTxAndRetryOnFail = async (
 	tx.lastValidBlockHeight = lastValidBlockHeight
 	tx.feePayer = ctx.wallet.publicKey
 
-	if (signers) {
+	if (signers?.length) {
 		tx.partialSign(...signers)
 	}
 	ctx.wallet.signTransaction(tx)

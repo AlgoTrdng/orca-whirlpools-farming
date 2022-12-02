@@ -18,10 +18,7 @@ type ParseTransactionParams = {
 }
 
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
-export const parsePostTransactionBalances = ({
-	meta,
-	mints,
-}: ParseTransactionParams) => {
+export const parsePostTransactionBalances = ({ meta, mints }: ParseTransactionParams) => {
 	const { postBalances, postTokenBalances } = meta
 
 	assert(!!postTokenBalances, 'PostTokenBalances are not defined')

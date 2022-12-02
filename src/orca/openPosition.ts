@@ -10,15 +10,14 @@ import {
 } from '@orca-so/whirlpools-sdk'
 import { PublicKey, Transaction } from '@solana/web3.js'
 import { getAssociatedTokenAddressSync, AccountLayout, RawAccount } from '@solana/spl-token'
-import { setTimeout } from 'node:timers/promises'
 import { Layout } from '@solana/buffer-layout'
 import Decimal from 'decimal.js'
 
 import { SLIPPAGE_TOLERANCE, SOL_MINT, SOL_USDC_WHIRLPOOL_ADDRESS } from '../constants.js'
 import { connection, ctx, fetcher, provider } from '../global.js'
-import { sendAndConfirmTransaction } from '../solana/sendTransaction.js'
 import { ExecuteJupiterSwapParams, executeJupiterSwap } from '../utils/jupiter.js'
 import { retryOnThrow } from '../utils/retryOnThrow.js'
+import { sendTxAndRetryOnFail } from '../utils/sendTxAndRetryOnFail.js'
 
 const accountLayout: Layout<RawAccount> = AccountLayout
 
@@ -132,16 +131,9 @@ export const openPosition = async ({
 			funder: provider.wallet.publicKey,
 		})
 		tx.add(...ix.instructions)
-		ctx.wallet.signTransaction(tx)
 
 		console.log('Initializing tick array account')
-		while (true) {
-			const res = await sendAndConfirmTransaction(tx)
-			if (res.success) {
-				break
-			}
-			await setTimeout(500)
-		}
+		await sendTxAndRetryOnFail(tx)
 	}
 
 	// Calculate boundaries ticks
@@ -173,34 +165,31 @@ export const openPosition = async ({
 				: getAssociatedTokenAddressSync(whirlpool.getTokenAInfo().mint, ctx.wallet.publicKey),
 			getAssociatedTokenAddressSync(whirlpool.getTokenBInfo().mint, ctx.wallet.publicKey),
 		]
-		while (true) {
-			const [tokenAATAccount, tokenBATAccount] = await retryOnThrow(() =>
-				connection.getMultipleAccountsInfo(swapTokensAddresses),
-			)
+		const [tokenAATAccount, tokenBATAccount] = await retryOnThrow(() =>
+			connection.getMultipleAccountsInfo(swapTokensAddresses),
+		)
 
-			if (tokenAATAccount && tokenBATAccount) {
-				let tokenABalanceRaw = 0
+		if (!tokenAATAccount || !tokenBATAccount) {
+			throw Error('Position tokens ATAccounts are not crated')
+		}
 
-				if (swapTokensAddresses[0].equals(ctx.wallet.publicKey)) {
-					// Subtract 0.07 SOL to always leave some in wallet
-					tokenABalanceRaw = tokenAATAccount.lamports - 70_000_000
-				} else {
-					const { amount } = accountLayout.decode(tokenAATAccount.data)
-					tokenABalanceRaw = Number(amount)
-				}
+		let tokenABalanceRaw = 0
+		if (swapTokensAddresses[0].equals(ctx.wallet.publicKey)) {
+			// Subtract 0.07 SOL to always leave some in wallet
+			tokenABalanceRaw = tokenAATAccount.lamports - 70_000_000
+		} else {
+			const { amount } = accountLayout.decode(tokenAATAccount.data)
+			tokenABalanceRaw = Number(amount)
+		}
 
-				const { amount: tokenBBalance } = accountLayout.decode(tokenBATAccount.data)
-				return {
-					tokenB: Number(tokenBBalance),
-					tokenA: tokenABalanceRaw,
-				}
-			}
-			await setTimeout(500)
+		const { amount: tokenBBalance } = accountLayout.decode(tokenBATAccount.data)
+		return {
+			tokenB: Number(tokenBBalance),
+			tokenA: tokenABalanceRaw,
 		}
 	})()
 
 	const { tokenEstA, tokenEstB } = increaseLiquidityInput
-	console.log({ tokenEstA: tokenEstA.toString(), tokenEstB: tokenEstB.toString() })
 	const swapParams = calculateSwapAmounts(
 		{ tokenA: tokenAMint, tokenB: tokenBMint },
 		{ tokenA: tokenEstA.toNumber(), tokenB: tokenEstB.toNumber() },
@@ -228,18 +217,11 @@ export const openPosition = async ({
 		openPositionTxBuilder.build(),
 	)
 
-	openPositionTx.partialSign(...signers)
-	ctx.wallet.signTransaction(openPositionTx)
-
 	console.log('Opening position and depositing liquidity')
-	while (true) {
-		const res = await sendAndConfirmTransaction(openPositionTx)
-		if (res.success) {
-			break
-		}
-		await setTimeout(500)
-	}
+	await sendTxAndRetryOnFail(openPositionTx, signers)
 	console.log('Successfully deposited liquidity')
 
-	return { positionMint }
+	return {
+		positionMint,
+	}
 }
