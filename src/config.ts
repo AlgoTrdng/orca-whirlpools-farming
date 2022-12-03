@@ -16,3 +16,9 @@ if (!res.success) {
 }
 
 export const { ANCHOR_PROVIDER_URL: RPC_URL, DB_PATH } = res.data
+
+/**
+ * Total liquidity position size
+ * - Deposited liquidity value in USDC will be approximately this amount
+ */
+export const POSITION_SIZE_UI = 20

@@ -24,6 +24,7 @@ import { ExecuteJupiterSwapParams, executeJupiterSwap } from '../utils/jupiter.j
 import { retryOnThrow } from '../utils/retryOnThrow.js'
 import { sendTxAndRetryOnFail } from '../utils/sendTxAndRetryOnFail.js'
 import { parsePostTransactionBalances } from '../solana/parseTransaction.js'
+import { POSITION_SIZE_UI } from '../config.js'
 
 const accountLayout: Layout<RawAccount> = AccountLayout
 
@@ -153,7 +154,7 @@ export const openPosition = async ({
 	// Get deposit amounts
 	const increaseLiquidityInput = increaseLiquidityQuoteByInputToken(
 		whirlpoolData.tokenMintB,
-		new Decimal(1),
+		new Decimal(Number((POSITION_SIZE_UI / 2).toFixed(6))),
 		tickLowerBoundary,
 		tickUpperBoundary,
 		SLIPPAGE_TOLERANCE,
