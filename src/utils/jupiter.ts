@@ -3,7 +3,6 @@ import fetch from 'node-fetch'
 import { setTimeout } from 'node:timers/promises'
 
 import { ctx } from '../global.js'
-import { parsePostTransactionBalances } from '../solana/parseTransaction.js'
 import { sendAndConfirmTransaction, TransactionErrorResponse } from '../solana/sendTransaction.js'
 
 const JUPITER_QUOTE_API = 'https://quote-api.jup.ag/v3/quote?slippageBps=10'
@@ -134,17 +133,13 @@ export const executeJupiterSwap = async ({
 				await execute(txs.setup)
 			}
 
-			const swapResponse = await execute(txs.swap)
+			await execute(txs.swap)
 
 			if (txs.cleanup) {
 				await execute(txs.cleanup)
 			}
 
-			return parsePostTransactionBalances({
-				meta: swapResponse,
-				inputMint,
-				outputMint,
-			})
+			return
 		} catch (error) {
 			const errorMsg = (error as Error).message as TransactionErrorResponse
 			console.log({ errorMsg })

@@ -32,7 +32,7 @@ type GetQuoteParams = {
 	refresh?: boolean
 }
 
-export const getQuote = async ({
+const getQuote = async ({
 	whirlpool,
 	inputMint,
 	inputAmountUi,
@@ -72,7 +72,7 @@ export const getQuote = async ({
 	}
 }
 
-export const getAvgPriceWithBoundaries = async ({ whirlpool }: GetQuoteParams) => {
+export const getAvgPriceWithBoundaries = async (whirlpool: Whirlpool) => {
 	const tokenA = whirlpool.getTokenAInfo()
 	const aToBQuote = await getQuote({
 		whirlpool,

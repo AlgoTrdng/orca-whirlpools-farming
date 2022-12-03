@@ -28,7 +28,7 @@ const watchTxConfirmation = async (startTime: number, txId: string, abortSignal:
 			}),
 			setTimeout(5000),
 		])
-		console.log(response)
+		console.log('TxResponse', response)
 		if (response?.meta) {
 			if (response.meta.err) {
 				const jupTxError = response.meta.err as JupiterTxError

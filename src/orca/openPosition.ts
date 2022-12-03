@@ -13,11 +13,17 @@ import { getAssociatedTokenAddressSync, AccountLayout, RawAccount } from '@solan
 import { Layout } from '@solana/buffer-layout'
 import Decimal from 'decimal.js'
 
-import { SLIPPAGE_TOLERANCE, SOL_MINT, SOL_USDC_WHIRLPOOL_ADDRESS } from '../constants.js'
+import {
+	SLIPPAGE_TOLERANCE,
+	SOL_MINT,
+	SOL_USDC_WHIRLPOOL_ADDRESS,
+	USDC_MINT,
+} from '../constants.js'
 import { connection, ctx, fetcher, provider } from '../global.js'
 import { ExecuteJupiterSwapParams, executeJupiterSwap } from '../utils/jupiter.js'
 import { retryOnThrow } from '../utils/retryOnThrow.js'
 import { sendTxAndRetryOnFail } from '../utils/sendTxAndRetryOnFail.js'
+import { parsePostTransactionBalances } from '../solana/parseTransaction.js'
 
 const accountLayout: Layout<RawAccount> = AccountLayout
 
@@ -147,7 +153,7 @@ export const openPosition = async ({
 	// Get deposit amounts
 	const increaseLiquidityInput = increaseLiquidityQuoteByInputToken(
 		whirlpoolData.tokenMintB,
-		new Decimal(1),
+		new Decimal(20),
 		tickLowerBoundary,
 		tickUpperBoundary,
 		SLIPPAGE_TOLERANCE,
@@ -218,10 +224,16 @@ export const openPosition = async ({
 	)
 
 	console.log('Opening position and depositing liquidity')
-	await sendTxAndRetryOnFail(openPositionTx, signers)
+	const meta = await sendTxAndRetryOnFail(openPositionTx, signers)
 	console.log('Successfully deposited liquidity')
 
+	const postTxBalances = parsePostTransactionBalances({
+		mints: [SOL_MINT, USDC_MINT],
+		meta,
+	})
+
 	return {
+		balances: postTxBalances,
 		positionMint,
 	}
 }

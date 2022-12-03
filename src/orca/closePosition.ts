@@ -6,7 +6,7 @@ import {
 	PDAUtil,
 	TickArrayData,
 	TickArrayUtil,
-	Whirlpool,
+	WhirlpoolData,
 	WhirlpoolIx,
 } from '@orca-so/whirlpools-sdk'
 import {
@@ -20,10 +20,8 @@ import {
 	SLIPPAGE_TOLERANCE,
 	SOL_MINT,
 	SOL_USDC_WHIRLPOOL_ADDRESS,
-	USDC_MINT,
 } from '../constants.js'
 import { connection, ctx, fetcher, solATAddress, usdcATAddress } from '../global.js'
-import { parsePostTransactionBalances } from '../solana/parseTransaction.js'
 import { retryOnThrow } from '../utils/retryOnThrow.js'
 import { sendTxAndRetryOnFail } from '../utils/sendTxAndRetryOnFail.js'
 
@@ -71,17 +69,15 @@ const getTickData = async ({
 
 type ClosePositionParams = {
 	positionAddress: PublicKey
-	whirlpool: Whirlpool
+	whirlpoolData: WhirlpoolData
 }
 
-export const closePosition = async ({ positionAddress, whirlpool }: ClosePositionParams) => {
+export const closePosition = async ({ positionAddress, whirlpoolData }: ClosePositionParams) => {
 	const position = await retryOnThrow(() => fetcher.getPosition(positionAddress, true))
 
 	if (!position) {
 		throw Error(`Could not fetch position: ${positionAddress.toString()}`)
 	}
-
-	const whirlpoolData = whirlpool.getData()
 
 	// Get upper and lower tick array addresses
 	const { publicKey: tickLowerArrayAddress } = PDAUtil.getTickArrayFromTickIndex(
@@ -217,10 +213,5 @@ export const closePosition = async ({ positionAddress, whirlpool }: ClosePositio
 		createCloseAccountInstruction(solATAddress, ctx.wallet.publicKey, ctx.wallet.publicKey),
 	)
 
-	const meta = await sendTxAndRetryOnFail(tx)
-	const parsed = parsePostTransactionBalances({
-		mints: [SOL_MINT, USDC_MINT],
-		meta,
-	})
-	return parsed
+	await sendTxAndRetryOnFail(tx)
 }
