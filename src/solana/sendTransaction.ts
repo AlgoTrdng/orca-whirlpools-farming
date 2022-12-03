@@ -22,9 +22,11 @@ type JupiterTxError = {
 const watchTxConfirmation = async (startTime: number, txId: string, abortSignal: AbortSignal) => {
 	while (new Date().getTime() - startTime < MAX_CONFIRMATION_TIME && !abortSignal.aborted) {
 		const response = await Promise.any([
+			// TODO: Try to fix error
+			// StructError: Expected the value to satisfy a union of `type | type`, but received: [object Object]
 			connection.getTransaction(txId, {
 				commitment: 'confirmed',
-				maxSupportedTransactionVersion: 2,
+				maxSupportedTransactionVersion: 0,
 			}),
 			setTimeout(5000),
 		])
@@ -41,7 +43,7 @@ const watchTxConfirmation = async (startTime: number, txId: string, abortSignal:
 
 			return response.meta
 		}
-		await setTimeout(500)
+		await setTimeout(1000)
 	}
 
 	return TransactionErrorResponse.TIMEOUT

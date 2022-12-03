@@ -13,4 +13,4 @@ export const RANGE_SPACING_BPS = 0.04
 
 export const SLIPPAGE_TOLERANCE = new Percentage(new BN(25), new BN(10000))
 
-export const MIN_SOL_AMOUNT_RAW = 700_000_000
+export const MIN_SOL_AMOUNT_RAW = 70_000_000
