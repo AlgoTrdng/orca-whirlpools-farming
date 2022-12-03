@@ -16,11 +16,7 @@ import {
 } from '@solana/spl-token'
 import { PublicKey, Transaction } from '@solana/web3.js'
 
-import {
-	SLIPPAGE_TOLERANCE,
-	SOL_MINT,
-	SOL_USDC_WHIRLPOOL_ADDRESS,
-} from '../constants.js'
+import { SLIPPAGE_TOLERANCE, SOL_MINT, SOL_USDC_WHIRLPOOL_ADDRESS } from '../constants.js'
 import { connection, ctx, fetcher, solATAddress, usdcATAddress } from '../global.js'
 import { retryOnThrow } from '../utils/retryOnThrow.js'
 import { sendTxAndRetryOnFail } from '../utils/sendTxAndRetryOnFail.js'

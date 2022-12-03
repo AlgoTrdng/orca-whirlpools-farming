@@ -7,21 +7,24 @@ import { closePosition } from './orca/closePosition.js'
 import { openPosition } from './orca/openPosition.js'
 import { state } from './state.js'
 import { executeJupiterSwap } from './utils/jupiter.js'
-import { getAvgPriceWithBoundaries } from './utils/quote.js'
-
-const solWhirlpool = await whirlpoolClient.getPool(SOL_USDC_WHIRLPOOL_ADDRESS, true)
-const whirlpoolData = solWhirlpool.getData()
+import { getQuoteWithBoundaries } from './utils/quote.js'
 
 const wait = () => setTimeout(60_000)
+
+console.log(state)
 
 // INIT
 // Open position
 if (!state.position) {
-	const { higherBoundary, lowerBoundary, price } = await getAvgPriceWithBoundaries(solWhirlpool)
+	const solWhirlpool = await whirlpoolClient.getPool(SOL_USDC_WHIRLPOOL_ADDRESS, true)
+	const { higherBoundary, lowerBoundary, price } = await getQuoteWithBoundaries({
+		whirlpoolAddress: solWhirlpool.getAddress(),
+		whirlpoolData: solWhirlpool.getData(),
+	})
 
 	const { positionMint } = await openPosition({
 		whirlpool: solWhirlpool,
-		whirlpoolData,
+		whirlpoolData: solWhirlpool.getData(),
 		upperBoundaryPrice: higherBoundary,
 		lowerBoundaryPrice: lowerBoundary,
 	})
@@ -37,13 +40,18 @@ if (!state.position) {
 
 // WATCH
 while (true) {
-	const { price, higherBoundary, lowerBoundary } = await getAvgPriceWithBoundaries(solWhirlpool)
+	const solWhirlpool = await whirlpoolClient.getPool(SOL_USDC_WHIRLPOOL_ADDRESS, true)
+	const whirlpoolData = solWhirlpool.getData()
+	const { price, higherBoundary, lowerBoundary } = await getQuoteWithBoundaries({
+		whirlpoolAddress: solWhirlpool.getAddress(),
+		whirlpoolData,
+	})
 
 	console.log(
-		`Current price: ${price}\n` +
-		`Position: \n` +
-		` Open price: ${state.position.openPrice}\n` +
-		` Current position shift: ${price / state.position.openPrice - 1}`,
+		`\nCurrent price: ${price}\n` +
+			`Position: \n` +
+			` Open price: ${state.position.openPrice}\n` +
+			` Current position price deviation: ${(price / state.position.openPrice - 1) * 100}`,
 	)
 
 	// Check if current is in bounds

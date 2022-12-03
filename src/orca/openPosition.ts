@@ -211,6 +211,7 @@ export const openPosition = async ({
 	}
 
 	// Deposit liquidity
+	// TODO: Use WhirlpoolIx to build this Tx
 	const { positionMint, tx: openPositionTxBuilder } = await retryOnThrow(() =>
 		whirlpool.openPosition(
 			tickLowerBoundary,
