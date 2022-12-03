@@ -11,11 +11,9 @@ import { getQuoteWithBoundaries } from './utils/quote.js'
 
 const wait = () => setTimeout(60_000)
 
-console.log(state)
-
 // INIT
 // Open position
-if (!state.position) {
+if (!state.data?.position) {
 	const solWhirlpool = await whirlpoolClient.getPool(SOL_USDC_WHIRLPOOL_ADDRESS, true)
 	const { higherBoundary, lowerBoundary, price } = await getQuoteWithBoundaries({
 		whirlpoolAddress: solWhirlpool.getAddress(),
@@ -30,11 +28,14 @@ if (!state.position) {
 	})
 	const positionPDAddress = PDAUtil.getPosition(ORCA_WHIRLPOOL_PROGRAM_ID, positionMint)
 
-	state.position = {
-		address: positionPDAddress.publicKey,
-		openPrice: price,
+	state.data = {
+		position: {
+			address: positionPDAddress.publicKey,
+			openPrice: price,
+		},
 	}
 
+	await state.write()
 	await wait()
 }
 
@@ -47,22 +48,24 @@ while (true) {
 		whirlpoolData,
 	})
 
+	const position = state.data.position!
+
 	console.log(
 		`\nCurrent price: ${price}\n` +
 			`Position: \n` +
-			` Open price: ${state.position.openPrice}\n` +
-			` Current position price deviation: ${(price / state.position.openPrice - 1) * 100}`,
+			` Open price: ${position.openPrice}\n` +
+			` Current position price deviation: ${(price / position.openPrice - 1) * 100}`,
 	)
 
 	// Check if current is in bounds
-	if (price * 1.02 > state.position.openPrice || price * 0.98 < state.position.openPrice) {
+	if (price * 1.02 > position.openPrice || price * 0.98 < position.openPrice) {
 		await wait()
 		continue
 	}
 
 	// Close position
 	await closePosition({
-		positionAddress: state.position.address,
+		positionAddress: position.address,
 		whirlpoolData,
 	})
 
@@ -75,9 +78,11 @@ while (true) {
 	})
 	const positionPDAddress = PDAUtil.getPosition(ORCA_WHIRLPOOL_PROGRAM_ID, positionMint)
 
-	state.position = {
-		address: positionPDAddress.publicKey,
-		openPrice: price,
+	state.data = {
+		position: {
+			address: positionPDAddress.publicKey,
+			openPrice: price,
+		},
 	}
 
 	// Swap overflow SOL amount to USDC
@@ -93,5 +98,6 @@ while (true) {
 		})
 	}
 
+	await state.write()
 	await wait()
 }
