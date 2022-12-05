@@ -56,7 +56,7 @@ while (true) {
 	)
 
 	// Check if current is in bounds
-	if (price * 1.02 > position.openPrice || price * 0.98 < position.openPrice) {
+	if (position.openPrice * 0.98 < price && position.openPrice * 1.02 > price) {
 		await wait()
 		continue
 	}
