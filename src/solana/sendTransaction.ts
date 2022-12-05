@@ -2,6 +2,7 @@ import { ConfirmedTransactionMeta, Transaction } from '@solana/web3.js'
 import { setTimeout } from 'node:timers/promises'
 
 import { connection } from '../global.js'
+import { getTransaction } from './getTransaction.js'
 
 const MAX_CONFIRMATION_TIME = 120_000
 
@@ -21,28 +22,22 @@ type JupiterTxError = {
 
 const watchTxConfirmation = async (startTime: number, txId: string, abortSignal: AbortSignal) => {
 	while (new Date().getTime() - startTime < MAX_CONFIRMATION_TIME && !abortSignal.aborted) {
-		const response = await Promise.any([
-			// TODO: Try to fix error
-			// StructError: Expected the value to satisfy a union of `type | type`, but received: [object Object]
-			connection.getTransaction(txId, {
-				commitment: 'confirmed',
-				maxSupportedTransactionVersion: 0,
-			}),
-			setTimeout(5000),
-		])
-		console.log('TxResponse', response)
-		if (response?.meta) {
-			if (response.meta.err) {
-				const jupTxError = response.meta.err as JupiterTxError
-				if (jupTxError.InstructionError && jupTxError.InstructionError[1].Custom === 6000) {
-					return TransactionErrorResponse.SLIPPAGE_EXCEEDED
-				}
-				console.log('TX_ERROR', response.meta.err)
-				return TransactionErrorResponse.GENERIC_ERROR
+		const response = await Promise.any([getTransaction(txId), setTimeout(5000)])
+		console.log('TX', response)
+		if (response?.meta?.err) {
+			console.log('TX_ERROR', response.meta.err)
+			const jupTxError = response.meta.err as JupiterTxError
+			if (jupTxError.InstructionError && jupTxError.InstructionError[1].Custom === 6000) {
+				return TransactionErrorResponse.SLIPPAGE_EXCEEDED
 			}
+			console.log('TX_ERROR', response.meta.err)
+			return TransactionErrorResponse.GENERIC_ERROR
+		}
 
+		if (response?.meta) {
 			return response.meta
 		}
+
 		await setTimeout(1000)
 	}
 
