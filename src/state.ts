@@ -34,16 +34,22 @@ class CustomAdapter implements Adapter<State> {
 				position: null,
 			}
 		}
-		const parsed = JSON.parse(data) as JSONState
-		if (parsed.position) {
+		try {
+			const parsed = JSON.parse(data) as JSONState
+			if (parsed.position) {
+				return {
+					position: {
+						address: new PublicKey(parsed.position.address),
+						openPrice: parsed.position.openPrice,
+					},
+				}
+			}
+			return parsed as State
+		} catch (error) {
 			return {
-				position: {
-					address: new PublicKey(parsed.position.address),
-					openPrice: parsed.position.openPrice,
-				},
+				position: null,
 			}
 		}
-		return parsed as State
 	}
 
 	async write(data: State) {

@@ -39,4 +39,9 @@ declare module '@solana/spl-token' {
 		multiSigners?: Signer[],
 		programId?: PublicKey,
 	): TransactionInstruction
+
+	export function createSyncNativeInstruction(
+		account: PublicKey,
+		programId?: PublicKey,
+	): TransactionInstruction
 }

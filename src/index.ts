@@ -2,8 +2,8 @@ import { ORCA_WHIRLPOOL_PROGRAM_ID, PDAUtil } from '@orca-so/whirlpools-sdk'
 import { setTimeout } from 'node:timers/promises'
 
 import { USDC_MINT, SOL_USDC_WHIRLPOOL_ADDRESS, SOL_MINT, MIN_SOL_AMOUNT_RAW } from './constants.js'
-import { whirlpoolClient } from './global.js'
 import { closePosition } from './orca/closePosition.js'
+import { getWhirlpoolData } from './orca/getPool.js'
 import { openPosition } from './orca/openPosition.js'
 import { state } from './state.js'
 import { executeJupiterSwap } from './utils/jupiter.js'
@@ -14,15 +14,14 @@ const wait = () => setTimeout(60_000)
 // INIT
 // Open position
 if (!state.data?.position) {
-	const solWhirlpool = await whirlpoolClient.getPool(SOL_USDC_WHIRLPOOL_ADDRESS, true)
+	const whirlpoolData = await getWhirlpoolData(SOL_USDC_WHIRLPOOL_ADDRESS)
 	const { higherBoundary, lowerBoundary, price } = await getQuoteWithBoundaries({
-		whirlpoolAddress: solWhirlpool.getAddress(),
-		whirlpoolData: solWhirlpool.getData(),
+		whirlpoolAddress: SOL_USDC_WHIRLPOOL_ADDRESS,
+		whirlpoolData: whirlpoolData,
 	})
-
 	const { positionMint } = await openPosition({
-		whirlpool: solWhirlpool,
-		whirlpoolData: solWhirlpool.getData(),
+		whirlpoolAddress: SOL_USDC_WHIRLPOOL_ADDRESS,
+		whirlpoolData: whirlpoolData,
 		upperBoundaryPrice: higherBoundary,
 		lowerBoundaryPrice: lowerBoundary,
 	})
@@ -41,10 +40,9 @@ if (!state.data?.position) {
 
 // WATCH
 while (true) {
-	const solWhirlpool = await whirlpoolClient.getPool(SOL_USDC_WHIRLPOOL_ADDRESS, true)
-	const whirlpoolData = solWhirlpool.getData()
+	const whirlpoolData = await getWhirlpoolData(SOL_USDC_WHIRLPOOL_ADDRESS)
 	const { price, higherBoundary, lowerBoundary } = await getQuoteWithBoundaries({
-		whirlpoolAddress: solWhirlpool.getAddress(),
+		whirlpoolAddress: SOL_USDC_WHIRLPOOL_ADDRESS,
 		whirlpoolData,
 	})
 
@@ -73,8 +71,8 @@ while (true) {
 	const { positionMint, balances } = await openPosition({
 		upperBoundaryPrice: higherBoundary,
 		lowerBoundaryPrice: lowerBoundary,
-		whirlpool: solWhirlpool,
-		whirlpoolData,
+		whirlpoolAddress: SOL_USDC_WHIRLPOOL_ADDRESS,
+		whirlpoolData: await getWhirlpoolData(SOL_USDC_WHIRLPOOL_ADDRESS),
 	})
 	const positionPDAddress = PDAUtil.getPosition(ORCA_WHIRLPOOL_PROGRAM_ID, positionMint)
 
