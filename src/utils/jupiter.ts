@@ -59,55 +59,61 @@ export type ExecuteJupiterSwapParams = {
 	swapMode: SwapMode
 }
 
+type JupiterTransactions = {
+	setup?: Transaction
+	swap: Transaction
+	cleanup?: Transaction
+}
+
 const fetchJupiterTransactions = async ({
 	inputMint,
 	outputMint,
 	amountRaw,
 	swapMode,
-}: ExecuteJupiterSwapParams) => {
+}: ExecuteJupiterSwapParams): Promise<JupiterTransactions> => {
 	const urlParams = new URLSearchParams({
 		inputMint: inputMint.toString(),
 		outputMint: outputMint.toString(),
 		amount: amountRaw.toString(),
 		swapMode,
 	})
-	// Handle errors
-	const { data: routesInfos } = (await (
-		await fetch(`${JUPITER_QUOTE_API}&${urlParams.toString()}`)
-	).json()) as JupiterQuoteResponse
-	const res = (await (
-		await fetch(JUPITER_SWAP_API, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-			},
-			body: JSON.stringify({
-				route: routesInfos[0],
-				userPublicKey: ctx.wallet.publicKey.toString(),
-			}),
+	try {
+		const { data: routesInfos } = (await (
+			await fetch(`${JUPITER_QUOTE_API}&${urlParams.toString()}`)
+		).json()) as JupiterQuoteResponse
+		const res = (await (
+			await fetch(JUPITER_SWAP_API, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+				},
+				body: JSON.stringify({
+					route: routesInfos[0],
+					userPublicKey: ctx.wallet.publicKey.toString(),
+				}),
+			})
+		).json()) as JupiterSwapResponse
+
+		console.log(res)
+		const txs: [string, Transaction][] = [
+			['swap', Transaction.from(Buffer.from(res.swapTransaction, 'base64'))],
+		]
+		if (res.setupTransaction) {
+			txs.push(['setup', Transaction.from(Buffer.from(res.setupTransaction, 'base64'))])
+		}
+		if (res.cleanupTransaction) {
+			txs.push(['cleanup', Transaction.from(Buffer.from(res.cleanupTransaction, 'base64'))])
+		}
+
+		txs.forEach((tx) => {
+			ctx.wallet.signTransaction(tx[1])
 		})
-	).json()) as JupiterSwapResponse
 
-	const txs: [string, Transaction][] = [
-		['swap', Transaction.from(Buffer.from(res.swapTransaction, 'base64'))],
-	]
-	if (res.setupTransaction) {
-		txs.push(['setup', Transaction.from(Buffer.from(res.setupTransaction, 'base64'))])
-	}
-	if (res.cleanupTransaction) {
-		txs.push(['cleanup', Transaction.from(Buffer.from(res.cleanupTransaction, 'base64'))])
-	}
-
-	txs.forEach((tx) => {
-		ctx.wallet.signTransaction(tx[1])
-	})
-
-	return {
-		...Object.fromEntries(txs),
-	} as {
-		setup?: Transaction
-		swap: Transaction
-		cleanup?: Transaction
+		return Object.fromEntries(txs) as JupiterTransactions
+	} catch (error) {
+		console.log('FETCH JUPITER TX ERROR', error)
+		await setTimeout(500)
+		return fetchJupiterTransactions({ inputMint, outputMint, amountRaw, swapMode })
 	}
 }
 
