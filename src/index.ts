@@ -1,4 +1,5 @@
 import { ORCA_WHIRLPOOL_PROGRAM_ID, PDAUtil } from '@orca-so/whirlpools-sdk'
+import { PublicKey } from '@solana/web3.js'
 import { setTimeout } from 'node:timers/promises'
 
 import { USDC_MINT, SOL_USDC_WHIRLPOOL_ADDRESS, SOL_MINT, MIN_SOL_AMOUNT_RAW } from './constants.js'
@@ -11,6 +12,20 @@ import { getQuoteWithBoundaries } from './utils/quote.js'
 
 const wait = () => setTimeout(60_000)
 
+const swapRemainingSol = async (balances: Map<PublicKey, number>) => {
+	const solBalance = balances.get(SOL_MINT)
+	const overflowAmount = Number(solBalance) - MIN_SOL_AMOUNT_RAW
+	if (overflowAmount > MIN_SOL_AMOUNT_RAW * 1.4) {
+		console.log(`Swapping overflow SOL amount to USDC: ${overflowAmount}`)
+		await executeJupiterSwap({
+			inputMint: SOL_MINT,
+			outputMint: USDC_MINT,
+			amountRaw: overflowAmount,
+			swapMode: 'ExactIn',
+		})
+	}
+}
+
 // INIT
 // Open position
 if (!state.data?.position) {
@@ -19,7 +34,7 @@ if (!state.data?.position) {
 		whirlpoolAddress: SOL_USDC_WHIRLPOOL_ADDRESS,
 		whirlpoolData: whirlpoolData,
 	})
-	const { positionMint } = await openPosition({
+	const { positionMint, balances } = await openPosition({
 		whirlpoolAddress: SOL_USDC_WHIRLPOOL_ADDRESS,
 		whirlpoolData: whirlpoolData,
 		upperBoundaryPrice: higherBoundary,
@@ -33,6 +48,8 @@ if (!state.data?.position) {
 			openPrice: price,
 		},
 	}
+
+	await swapRemainingSol(balances)
 
 	await state.write()
 	await wait()
@@ -84,17 +101,7 @@ while (true) {
 	}
 
 	// Swap overflow SOL amount to USDC
-	const solBalance = balances.get(SOL_MINT)
-	const overflowAmount = Number(solBalance) - MIN_SOL_AMOUNT_RAW
-	if (overflowAmount > MIN_SOL_AMOUNT_RAW * 1.4) {
-		console.log(`Swapping overflow SOL amount to USDC: ${overflowAmount}`)
-		await executeJupiterSwap({
-			inputMint: SOL_MINT,
-			outputMint: USDC_MINT,
-			amountRaw: overflowAmount,
-			swapMode: 'ExactIn',
-		})
-	}
+	await swapRemainingSol(balances)
 
 	await state.write()
 	await wait()
