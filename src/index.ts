@@ -81,6 +81,8 @@ while (true) {
 	// Close position
 	await closePosition({
 		positionAddress: position.address,
+		whirlpoolAddress: SOL_USDC_WHIRLPOOL_ADDRESS,
+		refetch: false,
 		whirlpoolData,
 	})
 

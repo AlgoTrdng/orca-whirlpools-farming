@@ -3,7 +3,12 @@ import fetch from 'node-fetch'
 import { setTimeout } from 'node:timers/promises'
 
 import { ctx } from '../global.js'
-import { sendAndConfirmTransaction, TransactionErrorResponse } from '../solana/sendTransaction.js'
+import {
+	sendAndConfirmTransaction,
+	TransactionResponseStatus,
+	TxErrorResponse,
+	TxUnconfirmedResponse,
+} from '../solana/sendTransaction.js'
 
 const JUPITER_QUOTE_API = 'https://quote-api.jup.ag/v3/quote?slippageBps=10'
 const JUPITER_SWAP_API = 'https://quote-api.jup.ag/v3/swap'
@@ -123,14 +128,17 @@ export const executeJupiterSwap = async ({
 	amountRaw,
 	swapMode,
 }: ExecuteJupiterSwapParams) => {
-	let txs = await fetchJupiterTransactions({ inputMint, outputMint, amountRaw, swapMode })
+	const _fetchTxs = async () =>
+		fetchJupiterTransactions({ inputMint, outputMint, amountRaw, swapMode })
+
+	let txs = await _fetchTxs()
 
 	const execute = async (tx: Transaction) => {
 		const res = await sendAndConfirmTransaction(tx)
-		if (res.success) {
+		if (res.status === TransactionResponseStatus.SUCCESS) {
 			return res.data
 		}
-		throw Error(res.err)
+		throw res
 	}
 
 	while (true) {
@@ -146,18 +154,31 @@ export const executeJupiterSwap = async ({
 			}
 
 			return
-		} catch (error) {
-			const errorMsg = (error as Error).message as TransactionErrorResponse
-			console.log({ errorMsg })
-			switch (errorMsg) {
-				case TransactionErrorResponse.BLOCK_HEIGHT_EXCEEDED:
-				case TransactionErrorResponse.SLIPPAGE_EXCEEDED: {
-					txs = await fetchJupiterTransactions({ inputMint, outputMint, amountRaw, swapMode })
-				}
-				default: {
-					await setTimeout(500)
+		} catch (err) {
+			console.log('JUPITER ERROR', err)
+			const txError = err as TxErrorResponse | TxUnconfirmedResponse
+
+			if (txError.status === TransactionResponseStatus.BLOCK_HEIGHT_EXCEEDED) {
+				txs = await _fetchTxs()
+				continue
+			}
+
+			const jupError = txError.error
+			if (
+				jupError &&
+				typeof jupError !== 'string' &&
+				'InstructionError' in jupError &&
+				jupError?.InstructionError &&
+				jupError.InstructionError[1]
+			) {
+				// Slippage exceeded
+				if (jupError.InstructionError[1].Custom === 6000) {
+					txs = await _fetchTxs()
+					continue
 				}
 			}
+
+			await setTimeout(500)
 		}
 	}
 }

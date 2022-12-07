@@ -1,4 +1,4 @@
-import { ConfirmedTransactionMeta, Transaction } from '@solana/web3.js'
+import { ConfirmedTransactionMeta, Transaction, TransactionError } from '@solana/web3.js'
 import { setTimeout } from 'node:timers/promises'
 
 import { connection } from '../global.js'
@@ -6,49 +6,81 @@ import { getTransaction } from './getTransaction.js'
 
 const MAX_CONFIRMATION_TIME = 120_000
 
-export enum TransactionErrorResponse {
-	BLOCK_HEIGHT_EXCEEDED = 'blockHeightExceeded',
-	GENERIC_ERROR = 'genericError',
-	SLIPPAGE_EXCEEDED = 'slippageExceeded',
-	/** Max redemption time is exceeded */
-	TIMEOUT = 'transactionTimedOut',
+type InstructionError = [number, { Custom: number }]
+
+type TransactionInstructionError = {
+	InstructionError?: InstructionError
 }
 
-type JupiterInstructionError = [number, { Custom: number }]
-
-type JupiterTxError = {
-	InstructionError?: JupiterInstructionError
+export enum TransactionResponseStatus {
+	/** Tx was not confirmed and can not be confirmed anymore without updating block hash and block height */
+	BLOCK_HEIGHT_EXCEEDED = 'BLOCK_HEIGHT_EXCEEDED',
+	/** Tx failed with some error */
+	ERROR = 'ERROR',
+	/** Tx was not confirmed specified time in time, can be sent again with same txId */
+	TIMEOUT = 'TRANSACTION_TIMEOUT',
+	SUCCESS = 'SUCCESS',
 }
 
-const watchTxConfirmation = async (startTime: number, txId: string, abortSignal: AbortSignal) => {
+export type TxSuccessResponse = {
+	status: TransactionResponseStatus.SUCCESS
+	data: ConfirmedTransactionMeta
+	error: null
+}
+
+export type TxErrorResponse = {
+	status: TransactionResponseStatus.ERROR
+	data: null
+	error: TransactionError | TransactionInstructionError
+}
+
+export type TxUnconfirmedResponse = {
+	status: TransactionResponseStatus.TIMEOUT | TransactionResponseStatus.BLOCK_HEIGHT_EXCEEDED
+	data: null
+	error: null
+}
+
+const watchTxConfirmation = async (
+	startTime: number,
+	txId: string,
+	abortSignal: AbortSignal,
+): Promise<TxSuccessResponse | TxErrorResponse | TxUnconfirmedResponse> => {
 	while (new Date().getTime() - startTime < MAX_CONFIRMATION_TIME && !abortSignal.aborted) {
-		const response = await Promise.any([getTransaction(txId), setTimeout(5000)])
-		console.log('TX', response)
-		if (response?.meta?.err) {
-			console.log('TX_ERROR', response.meta.err)
-			const jupTxError = response.meta.err as JupiterTxError
-			if (jupTxError.InstructionError && jupTxError.InstructionError[1].Custom === 6000) {
-				return TransactionErrorResponse.SLIPPAGE_EXCEEDED
+		const tx = await Promise.any([getTransaction(txId), setTimeout(5000)])
+
+		if (tx?.meta?.err) {
+			console.log('TX ERROR', tx.meta.err)
+			return {
+				data: null,
+				error: tx.meta.err,
+				status: TransactionResponseStatus.ERROR,
 			}
-			console.log('TX_ERROR', response.meta.err)
-			return TransactionErrorResponse.GENERIC_ERROR
 		}
 
-		if (response?.meta) {
-			return response.meta
+		if (tx?.meta) {
+			console.log('TX META', tx.meta)
+			return {
+				data: tx.meta,
+				error: null,
+				status: TransactionResponseStatus.SUCCESS,
+			}
 		}
 
 		await setTimeout(1000)
 	}
 
-	return TransactionErrorResponse.TIMEOUT
+	return {
+		data: null,
+		error: null,
+		status: TransactionResponseStatus.TIMEOUT,
+	}
 }
 
 const watchBlockHeight = async (
 	startTime: number,
 	transaction: Transaction,
 	abortSignal: AbortSignal,
-) => {
+): Promise<TxUnconfirmedResponse> => {
 	// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
 	const txValidUntilBlockHeight = transaction.lastValidBlockHeight!
 
@@ -59,28 +91,26 @@ const watchBlockHeight = async (
 		} catch (err) {}
 
 		if (blockHeight > txValidUntilBlockHeight) {
-			return TransactionErrorResponse.BLOCK_HEIGHT_EXCEEDED
+			return {
+				status: TransactionResponseStatus.BLOCK_HEIGHT_EXCEEDED,
+				error: null,
+				data: null,
+			}
 		}
 
 		await setTimeout(2000)
 	}
 
-	return TransactionErrorResponse.TIMEOUT
-}
-
-export type SuccessResponse = {
-	success: true
-	data: ConfirmedTransactionMeta
-}
-
-export type ErrorResponse = {
-	success: false
-	err: TransactionErrorResponse
+	return {
+		status: TransactionResponseStatus.TIMEOUT,
+		data: null,
+		error: null,
+	}
 }
 
 export const sendAndConfirmTransaction = async (
 	transaction: Transaction,
-): Promise<SuccessResponse | ErrorResponse> => {
+): Promise<TxSuccessResponse | TxErrorResponse | TxUnconfirmedResponse> => {
 	const rawTx = transaction.serialize()
 	const txId = await connection.sendRawTransaction(rawTx, {
 		maxRetries: 20,
@@ -96,15 +126,5 @@ export const sendAndConfirmTransaction = async (
 	])
 	abortController.abort()
 
-	if (typeof response === 'string') {
-		return {
-			success: false,
-			err: response,
-		}
-	}
-
-	return {
-		success: true,
-		data: response,
-	}
+	return response
 }
