@@ -9,6 +9,7 @@ import {
 	TxErrorResponse,
 	TxUnconfirmedResponse,
 } from '../solana/sendTransaction.js'
+import { addBlockHashAndSign } from './sendTxAndRetryOnFail.js'
 
 const JUPITER_QUOTE_API = 'https://quote-api.jup.ag/v3/quote?slippageBps=10'
 const JUPITER_SWAP_API = 'https://quote-api.jup.ag/v3/swap'
@@ -110,9 +111,10 @@ const fetchJupiterTransactions = async ({
 			txs.push(['cleanup', Transaction.from(Buffer.from(res.cleanupTransaction, 'base64'))])
 		}
 
-		txs.forEach((tx) => {
-			ctx.wallet.signTransaction(tx[1])
-		})
+		for (let i = 0; i < txs.length; i++) {
+			const current = txs[i]
+			await addBlockHashAndSign(current[1])
+		}
 
 		return Object.fromEntries(txs) as JupiterTransactions
 	} catch (error) {
