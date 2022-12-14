@@ -1,10 +1,14 @@
-import { ConfirmedTransactionMeta, Transaction, TransactionError } from '@solana/web3.js'
+import { ConfirmedTransactionMeta, Transaction, TransactionError, VersionedTransaction } from '@solana/web3.js'
 import { setTimeout } from 'node:timers/promises'
 
 import { connection } from '../global.js'
 import { getTransaction } from './getTransaction.js'
 
 const MAX_CONFIRMATION_TIME = 120_000
+
+export type VersionedTxWithLastValidBlockHeight = VersionedTransaction & {
+	lastValidBlockHeight: number
+}
 
 type InstructionError = [number, { Custom: number }]
 
@@ -78,7 +82,7 @@ const watchTxConfirmation = async (
 
 const watchBlockHeight = async (
 	startTime: number,
-	transaction: Transaction,
+	transaction: Transaction | VersionedTxWithLastValidBlockHeight,
 	abortSignal: AbortSignal,
 ): Promise<TxUnconfirmedResponse> => {
 	// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
@@ -109,7 +113,7 @@ const watchBlockHeight = async (
 }
 
 export const sendAndConfirmTransaction = async (
-	transaction: Transaction,
+	transaction: Transaction | VersionedTxWithLastValidBlockHeight,
 ): Promise<TxSuccessResponse | TxErrorResponse | TxUnconfirmedResponse> => {
 	const rawTx = transaction.serialize()
 	const txId = await connection.sendRawTransaction(rawTx, {

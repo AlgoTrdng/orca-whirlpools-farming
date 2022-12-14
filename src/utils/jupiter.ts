@@ -1,18 +1,19 @@
-import { PublicKey, Transaction } from '@solana/web3.js'
+import { PublicKey, VersionedTransaction } from '@solana/web3.js'
 import fetch from 'node-fetch'
 import { setTimeout } from 'node:timers/promises'
 
-import { ctx } from '../global.js'
+import { wallet } from '../global.js'
 import {
 	sendAndConfirmTransaction,
 	TransactionResponseStatus,
 	TxErrorResponse,
 	TxUnconfirmedResponse,
+	VersionedTxWithLastValidBlockHeight,
 } from '../solana/sendTransaction.js'
 import { addBlockHashAndSign } from './sendTxAndRetryOnFail.js'
 
-const JUPITER_QUOTE_API = 'https://quote-api.jup.ag/v3/quote?slippageBps=10'
-const JUPITER_SWAP_API = 'https://quote-api.jup.ag/v3/swap'
+const JUPITER_QUOTE_API = 'https://quote-api.jup.ag/v4/quote?slippageBps=10'
+const JUPITER_SWAP_API = 'https://quote-api.jup.ag/v4/swap'
 
 type Fee = {
 	amount: string
@@ -51,9 +52,7 @@ type JupiterQuoteResponse = {
 }
 
 type JupiterSwapResponse = {
-	setupTransaction?: string
 	swapTransaction: string
-	cleanupTransaction?: string
 }
 
 type SwapMode = 'ExactIn' | 'ExactOut'
@@ -65,18 +64,12 @@ export type ExecuteJupiterSwapParams = {
 	swapMode: SwapMode
 }
 
-type JupiterTransactions = {
-	setup?: Transaction
-	swap: Transaction
-	cleanup?: Transaction
-}
-
-const fetchJupiterTransactions = async ({
+const fetchJupiterTransaction = async ({
 	inputMint,
 	outputMint,
 	amountRaw,
 	swapMode,
-}: ExecuteJupiterSwapParams): Promise<JupiterTransactions> => {
+}: ExecuteJupiterSwapParams): Promise<VersionedTxWithLastValidBlockHeight> => {
 	const urlParams = new URLSearchParams({
 		inputMint: inputMint.toString(),
 		outputMint: outputMint.toString(),
@@ -95,32 +88,23 @@ const fetchJupiterTransactions = async ({
 				},
 				body: JSON.stringify({
 					route: routesInfos[0],
-					userPublicKey: ctx.wallet.publicKey.toString(),
+					userPublicKey: wallet.publicKey.toString(),
 				}),
 			})
 		).json()) as JupiterSwapResponse
 
-		console.log(res)
-		const txs: [string, Transaction][] = [
-			['swap', Transaction.from(Buffer.from(res.swapTransaction, 'base64'))],
-		]
-		if (res.setupTransaction) {
-			txs.push(['setup', Transaction.from(Buffer.from(res.setupTransaction, 'base64'))])
-		}
-		if (res.cleanupTransaction) {
-			txs.push(['cleanup', Transaction.from(Buffer.from(res.cleanupTransaction, 'base64'))])
-		}
+		const tx = VersionedTransaction.deserialize(
+			Buffer.from(res.swapTransaction, 'base64'),
+		) as VersionedTxWithLastValidBlockHeight
 
-		for (let i = 0; i < txs.length; i++) {
-			const current = txs[i]
-			await addBlockHashAndSign(current[1])
-		}
-
-		return Object.fromEntries(txs) as JupiterTransactions
+		return addBlockHashAndSign({
+			version: 0,
+			tx,
+		})
 	} catch (error) {
 		console.log('FETCH JUPITER TX ERROR', error)
 		await setTimeout(500)
-		return fetchJupiterTransactions({ inputMint, outputMint, amountRaw, swapMode })
+		return fetchJupiterTransaction({ inputMint, outputMint, amountRaw, swapMode })
 	}
 }
 
@@ -131,56 +115,41 @@ export const executeJupiterSwap = async ({
 	swapMode,
 }: ExecuteJupiterSwapParams) => {
 	const _fetchTxs = async () =>
-		fetchJupiterTransactions({ inputMint, outputMint, amountRaw, swapMode })
+		fetchJupiterTransaction({ inputMint, outputMint, amountRaw, swapMode })
 
-	let txs = await _fetchTxs()
-
-	const execute = async (tx: Transaction) => {
-		const res = await sendAndConfirmTransaction(tx)
-		if (res.status === TransactionResponseStatus.SUCCESS) {
-			return res.data
-		}
-		throw res
-	}
+	let tx = await _fetchTxs()
 
 	while (true) {
-		try {
-			if (txs.setup) {
-				await execute(txs.setup)
-			}
+		const res = await sendAndConfirmTransaction(tx)
 
-			await execute(txs.swap)
-
-			if (txs.cleanup) {
-				await execute(txs.cleanup)
-			}
-
+		if (res.status === TransactionResponseStatus.SUCCESS) {
 			return
-		} catch (err) {
-			console.log('JUPITER ERROR', err)
-			const txError = err as TxErrorResponse | TxUnconfirmedResponse
+		}
 
-			if (txError.status === TransactionResponseStatus.BLOCK_HEIGHT_EXCEEDED) {
-				txs = await _fetchTxs()
+		const err = res.error
+		console.log('JUPITER ERROR', err)
+		const txError = err as TxErrorResponse | TxUnconfirmedResponse
+
+		if (txError.status === TransactionResponseStatus.BLOCK_HEIGHT_EXCEEDED) {
+			tx = await _fetchTxs()
+			continue
+		}
+
+		const jupError = txError.error
+		if (
+			jupError &&
+			typeof jupError !== 'string' &&
+			'InstructionError' in jupError &&
+			jupError?.InstructionError &&
+			jupError.InstructionError[1]
+		) {
+			// Slippage exceeded
+			if (jupError.InstructionError[1].Custom === 6000) {
+				tx = await _fetchTxs()
 				continue
 			}
-
-			const jupError = txError.error
-			if (
-				jupError &&
-				typeof jupError !== 'string' &&
-				'InstructionError' in jupError &&
-				jupError?.InstructionError &&
-				jupError.InstructionError[1]
-			) {
-				// Slippage exceeded
-				if (jupError.InstructionError[1].Custom === 6000) {
-					txs = await _fetchTxs()
-					continue
-				}
-			}
-
-			await setTimeout(500)
 		}
+
+		await setTimeout(500)
 	}
 }
