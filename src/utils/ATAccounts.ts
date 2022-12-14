@@ -1,11 +1,11 @@
-import { IncreaseLiquidityInput } from '@orca-so/whirlpools-sdk'
 import { createCloseAccountInstruction } from '@solana/spl-token'
 import { createSyncNativeInstruction } from '@solana/spl-token'
+import { getAssociatedTokenAddressSync } from '@solana/spl-token'
 import { createAssociatedTokenAccountInstruction } from '@solana/spl-token'
 import { PublicKey, SystemProgram, TransactionInstruction } from '@solana/web3.js'
 
 import { SOL_MINT } from '../constants.js'
-import { connection, ctx, tokenA, tokenB } from '../global.js'
+import { connection, ctx, wallet } from '../global.js'
 import { retryOnThrow } from './retryOnThrow.js'
 
 export type TokenData = {
@@ -50,20 +50,31 @@ export const buildCreateAndCloseATAccountsInstructions = async (tokensData: Toke
 	}
 }
 
-export const buildWrapSolInstruction = (liqInput: IncreaseLiquidityInput) => {
-	const instructions: TransactionInstruction[] = []
-	const amounts: number[] = [liqInput.tokenMaxA.toNumber(), liqInput.tokenMaxB.toNumber()]
-	;[tokenA, tokenB].forEach(({ mint, ATAddress }, i) => {
-		if (mint.equals(SOL_MINT)) {
-			instructions.push(
-				SystemProgram.transfer({
-					fromPubkey: ctx.wallet.publicKey,
-					toPubkey: ATAddress,
-					lamports: amounts[i],
-				}),
-				createSyncNativeInstruction(ATAddress),
-			)
-		}
-	})
-	return instructions
+export const buildWrapSolInstructions = (amountRaw: number) => {
+	const wrappedSolATAddress = getAssociatedTokenAddressSync(SOL_MINT, wallet.publicKey)
+
+	const main = [
+		createAssociatedTokenAccountInstruction(
+			wallet.publicKey,
+			wrappedSolATAddress,
+			wallet.publicKey,
+			SOL_MINT,
+		),
+		SystemProgram.transfer({
+			fromPubkey: ctx.wallet.publicKey,
+			toPubkey: wrappedSolATAddress,
+			lamports: amountRaw,
+		}),
+		createSyncNativeInstruction(wrappedSolATAddress),
+	]
+	const cleanup = createCloseAccountInstruction(
+		wrappedSolATAddress,
+		wallet.publicKey,
+		wallet.publicKey,
+	)
+
+	return {
+		main,
+		cleanup,
+	}
 }

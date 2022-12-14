@@ -22,10 +22,7 @@ import { sendTxAndRetryOnFail } from '../utils/sendTxAndRetryOnFail.js'
 import { parsePostTransactionBalances } from '../solana/parseTransaction.js'
 import { USDC_POSITION_SIZE, WHIRLPOOL_ADDRESS } from '../config.js'
 import { BN } from 'bn.js'
-import {
-	buildCreateAndCloseATAccountsInstructions,
-	buildWrapSolInstruction,
-} from '../utils/ATAccounts.js'
+import { buildWrapSolInstructions } from '../utils/ATAccounts.js'
 import { getCoingeckoPriceInUsd } from '../utils/getCoingeckoPrice.js'
 
 const accountLayout: Layout<RawAccount> = AccountLayout
@@ -376,9 +373,19 @@ export const openPosition = async ({
 	})
 	tx.add(createPositionIx)
 
-	const { setupInstructions, cleanupInstructions } =
-		await buildCreateAndCloseATAccountsInstructions([tokenA, tokenB])
-	const wrapSolIxs = buildWrapSolInstruction(inputLiqData.liqInput)
+	// Wrap SOL
+	const wrapSolIxs: TransactionInstruction[] = []
+	const cleanupIxs: TransactionInstruction[] = []
+	const wrappedSolTokenIndex = [tokenA, tokenB].findIndex(({ mint }) => mint.equals(SOL_MINT))
+	if (wrappedSolTokenIndex > -1) {
+		const amount =
+			wrappedSolTokenIndex === 0
+				? inputLiqData.liqInput.tokenMaxA.toNumber()
+				: inputLiqData.liqInput.tokenMaxB.toNumber()
+		const { cleanup, main } = buildWrapSolInstructions(amount)
+		wrapSolIxs.push(...main)
+		cleanupIxs.push(cleanup)
+	}
 
 	const depositLiquidityIxs = await buildDepositLiquidityIx({
 		liquidityInput: inputLiqData.liqInput,
@@ -388,7 +395,7 @@ export const openPosition = async ({
 		tickLowerIndex,
 		tickUpperIndex,
 	})
-	tx.add(...setupInstructions, ...wrapSolIxs, ...depositLiquidityIxs, ...cleanupInstructions)
+	tx.add(...wrapSolIxs, ...depositLiquidityIxs, ...cleanupIxs)
 
 	console.log('Opening position and depositing liquidity')
 	const meta = await sendTxAndRetryOnFail(tx, _signers)
