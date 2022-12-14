@@ -1,5 +1,6 @@
 import {
 	IncreaseLiquidityInput,
+	IncreaseLiquidityQuote,
 	increaseLiquidityQuoteByInputTokenWithParams,
 	ORCA_WHIRLPOOL_PROGRAM_ID,
 	PDAUtil,
@@ -8,34 +9,24 @@ import {
 	WhirlpoolData,
 	WhirlpoolIx,
 } from '@orca-so/whirlpools-sdk'
-import {
-	Keypair,
-	PublicKey,
-	SystemProgram,
-	Transaction,
-	TransactionInstruction,
-} from '@solana/web3.js'
+import { Keypair, PublicKey, Transaction, TransactionInstruction } from '@solana/web3.js'
 import { getAssociatedTokenAddressSync, AccountLayout, RawAccount } from '@solana/spl-token'
 import { Layout } from '@solana/buffer-layout'
 import Decimal from 'decimal.js'
 
-import {
-	decimals,
-	SLIPPAGE_TOLERANCE,
-	SOL_MINT,
-	SOL_USDC_WHIRLPOOL_ADDRESS,
-	USDC_MINT,
-} from '../constants.js'
-import { connection, ctx, fetcher, provider } from '../global.js'
+import { SLIPPAGE_TOLERANCE, SOL_MINT, USDC_MINT } from '../constants.js'
+import { connection, ctx, fetcher, tokenA, tokenACoingeckoId, tokenB, wallet } from '../global.js'
 import { ExecuteJupiterSwapParams, executeJupiterSwap } from '../utils/jupiter.js'
 import { retryOnThrow } from '../utils/retryOnThrow.js'
 import { sendTxAndRetryOnFail } from '../utils/sendTxAndRetryOnFail.js'
 import { parsePostTransactionBalances } from '../solana/parseTransaction.js'
-import { POSITION_SIZE_UI } from '../config.js'
-import { createAssociatedTokenAccountInstruction } from '@solana/spl-token'
-import { createSyncNativeInstruction } from '@solana/spl-token'
-import { createCloseAccountInstruction } from '@solana/spl-token'
+import { USDC_POSITION_SIZE, WHIRLPOOL_ADDRESS } from '../config.js'
 import { BN } from 'bn.js'
+import {
+	buildCreateAndCloseATAccountsInstructions,
+	buildWrapSolInstruction,
+} from '../utils/ATAccounts.js'
+import { getCoingeckoPriceInUsd } from '../utils/getCoingeckoPrice.js'
 
 const accountLayout: Layout<RawAccount> = AccountLayout
 
@@ -47,21 +38,17 @@ type GetBoundariesTicksParams = {
 	tickSpacing: number
 }
 
-const getBoundariesTicks = ({
+const getBoundariesTickIndexes = ({
 	upperBoundary,
 	lowerBoundary,
-	tokenAMint,
-	tokenBMint,
 	tickSpacing,
 }: GetBoundariesTicksParams) => {
-	const tokenADecimals = decimals[tokenAMint.toString()]
-	const tokenBDecimals = decimals[tokenBMint.toString()]
 	const tickUpperIndex = TickUtil.getInitializableTickIndex(
-		PriceMath.priceToTickIndex(new Decimal(upperBoundary), tokenADecimals, tokenBDecimals),
+		PriceMath.priceToTickIndex(new Decimal(upperBoundary), tokenA.decimals, tokenB.decimals),
 		tickSpacing,
 	)
 	const tickLowerIndex = TickUtil.getInitializableTickIndex(
-		PriceMath.priceToTickIndex(new Decimal(lowerBoundary), tokenADecimals, tokenBDecimals),
+		PriceMath.priceToTickIndex(new Decimal(lowerBoundary), tokenA.decimals, tokenB.decimals),
 		tickSpacing,
 	)
 	return {
@@ -70,99 +57,161 @@ const getBoundariesTicks = ({
 	}
 }
 
+type InputLiquidity = {
+	liqInput: IncreaseLiquidityQuote
+	usdcTokenIndex: 1 | 2 | null
+}
+
+const calculateInputLiquidity = async ({
+	tickLowerIndex,
+	tickUpperIndex,
+	whirlpoolData,
+}: ReturnType<typeof getBoundariesTickIndexes> & {
+	whirlpoolData: WhirlpoolData
+}): Promise<InputLiquidity> => {
+	const increaseLiqParams = {
+		slippageTolerance: SLIPPAGE_TOLERANCE,
+		tickLowerIndex,
+		tickUpperIndex,
+		...whirlpoolData,
+	}
+
+	const usdcPerTokenInputSize = USDC_POSITION_SIZE / 2
+	// if whirlpool token is USDC, calc liquidity by that token,
+	/** A = 1, B = 2, none = null */
+	const usdcTokenIndex = tokenA.mint.equals(USDC_MINT)
+		? 1
+		: tokenB.mint.equals(USDC_MINT)
+		? 2
+		: null
+
+	if (usdcTokenIndex === null) {
+		// use tokenA
+		const coingeckoTokenAPrice = await getCoingeckoPriceInUsd(tokenACoingeckoId)
+		const tokenAInputUI = usdcPerTokenInputSize / coingeckoTokenAPrice
+		return {
+			liqInput: increaseLiquidityQuoteByInputTokenWithParams({
+				inputTokenMint: tokenA.mint,
+				inputTokenAmount: new BN(Math.floor(tokenAInputUI * 10 ** tokenA.decimals)),
+				...increaseLiqParams,
+			}),
+			usdcTokenIndex: null,
+		}
+	}
+
+	// if whirlpool token is USDC, calc liquidity by that token
+	return {
+		liqInput: increaseLiquidityQuoteByInputTokenWithParams({
+			inputTokenMint: USDC_MINT,
+			inputTokenAmount: new BN(Math.floor(usdcPerTokenInputSize * 10 ** 6)),
+			...increaseLiqParams,
+		}),
+		usdcTokenIndex: usdcTokenIndex,
+	}
+}
+
+export const getWhirlpoolATAccountsBalances = async (): Promise<Balances> => {
+	const resolveATAddress = (mint: PublicKey) =>
+		mint.equals(SOL_MINT) ? wallet.publicKey : getAssociatedTokenAddressSync(mint, wallet.publicKey)
+
+	const swapTokensAddresses = [resolveATAddress(tokenA.mint), resolveATAddress(tokenB.mint)]
+	const accountInfos = await retryOnThrow(() =>
+		connection.getMultipleAccountsInfo(swapTokensAddresses),
+	)
+
+	const balances: number[] = []
+
+	swapTokensAddresses.forEach((ATAddress, i) => {
+		const currentAccountInfo = accountInfos[i]
+
+		if (!currentAccountInfo) {
+			balances[i] = 0
+			return
+		}
+
+		if (ATAddress.equals(wallet.publicKey)) {
+			// Subtract 0.07 SOL to always leave some SOL in wallet
+			balances[i] = currentAccountInfo.lamports - 70_000_000
+		} else {
+			const { amount } = accountLayout.decode(currentAccountInfo.data)
+			balances[i] = Number(amount)
+		}
+	})
+
+	return {
+		tokenA: balances[0],
+		tokenB: balances[1],
+	}
+}
+
 type Balances = {
 	tokenA: number
 	tokenB: number
 }
 
-type Mints = {
-	tokenA: PublicKey
-	tokenB: PublicKey
-}
-
-const calculateSwapAmounts = (
-	mints: Mints,
-	requiredBalances: Balances,
+const getRequiredSwapsParams = (
 	currentBalances: Balances,
-): ExecuteJupiterSwapParams | null => {
-	const tokenADiff = requiredBalances.tokenA - currentBalances.tokenA
-	const tokenBDiff = requiredBalances.tokenB - currentBalances.tokenB
+	inputLiquidity: InputLiquidity,
+): ExecuteJupiterSwapParams[] | null => {
+	const { tokenMaxA, tokenMaxB } = inputLiquidity.liqInput
+	// Expect user to have USDC
+	if (inputLiquidity.usdcTokenIndex) {
+		// usdc as input, other token as output
+		const swapParams = {
+			swapMode: 'ExactOut',
+			inputMint: USDC_MINT,
+		} as ExecuteJupiterSwapParams
+		if (inputLiquidity.usdcTokenIndex === 1) {
+			// tokenA is USDC
+			swapParams.amountRaw = tokenMaxB.toNumber() - currentBalances.tokenB
+			swapParams.outputMint = tokenB.mint
+		} else {
+			// tokenB is USDC
+			swapParams.amountRaw = tokenMaxA.toNumber() - currentBalances.tokenA
+			swapParams.outputMint = tokenA.mint
+		}
 
+		if (swapParams.amountRaw <= 0) {
+			return null
+		}
+		return [swapParams]
+	}
+
+	// Need to check both tokens and if needed swap USDC for token
+	const tokenADiff = tokenMaxA.toNumber() - currentBalances.tokenA
+	const tokenBDiff = tokenMaxB.toNumber() - currentBalances.tokenB
+
+	const swapsParams: ExecuteJupiterSwapParams[] = []
 	if (tokenADiff > 0) {
 		// Missing tokenA amount
 		// Need to swap B for tokenADiff amount
-		return {
+		swapsParams.push({
 			swapMode: 'ExactOut',
 			amountRaw: tokenADiff,
-			inputMint: mints.tokenB,
-			outputMint: mints.tokenA,
-		}
+			inputMint: USDC_MINT,
+			outputMint: tokenA.mint,
+		})
 	}
-
 	if (tokenBDiff > 0) {
 		// Missing tokenB amount
 		// Need to swap A fot tokenBDiff amount
-		return {
+		swapsParams.push({
 			swapMode: 'ExactOut',
 			amountRaw: tokenBDiff,
-			inputMint: mints.tokenA,
-			outputMint: mints.tokenB,
-		}
+			inputMint: USDC_MINT,
+			outputMint: tokenB.mint,
+		})
 	}
 
-	return null
-}
-
-type GetWhirlpoolATAccountsBalancesParams = {
-	tokenAMint: PublicKey
-	tokenBMint: PublicKey
-}
-
-export const getWhirlpoolATAccountsBalances = async ({
-	tokenAMint,
-	tokenBMint,
-}: GetWhirlpoolATAccountsBalancesParams): Promise<Balances> => {
-	const swapTokensAddresses = [
-		tokenAMint.equals(SOL_MINT)
-			? ctx.wallet.publicKey
-			: getAssociatedTokenAddressSync(tokenAMint, ctx.wallet.publicKey),
-		getAssociatedTokenAddressSync(tokenBMint, ctx.wallet.publicKey),
-	]
-	const [tokenAATAccount, tokenBATAccount] = await retryOnThrow(() =>
-		connection.getMultipleAccountsInfo(swapTokensAddresses),
-	)
-
-	if (!tokenAATAccount || !tokenBATAccount) {
-		throw Error('Position tokens ATAccounts are not created')
-	}
-
-	let tokenABalanceRaw = 0
-	if (swapTokensAddresses[0].equals(ctx.wallet.publicKey)) {
-		// Subtract 0.07 SOL to always leave some SOL in wallet
-		tokenABalanceRaw = tokenAATAccount.lamports - 70_000_000
-	} else {
-		const { amount } = accountLayout.decode(tokenAATAccount.data)
-		tokenABalanceRaw = Number(amount)
-	}
-
-	const { amount: tokenBBalance } = accountLayout.decode(tokenBATAccount.data)
-	return {
-		tokenB: Number(tokenBBalance),
-		tokenA: tokenABalanceRaw,
-	}
+	return swapsParams.length ? swapsParams : null
 }
 
 type BuildCreatePositionIxParams = {
-	whirlpoolAddress: PublicKey
 	tickLowerIndex: number
 	tickUpperIndex: number
 }
 
-const buildCreatePositionIx = ({
-	whirlpoolAddress,
-	tickLowerIndex,
-	tickUpperIndex,
-}: BuildCreatePositionIxParams) => {
+const buildCreatePositionIx = ({ tickLowerIndex, tickUpperIndex }: BuildCreatePositionIxParams) => {
 	const positionMintKeypair = new Keypair()
 	const positionPDAddress = PDAUtil.getPosition(
 		ORCA_WHIRLPOOL_PROGRAM_ID,
@@ -171,16 +220,16 @@ const buildCreatePositionIx = ({
 
 	const positionATAddress = getAssociatedTokenAddressSync(
 		positionMintKeypair.publicKey,
-		ctx.wallet.publicKey,
+		wallet.publicKey,
 	)
 
 	const { instructions } = WhirlpoolIx.openPositionIx(ctx.program, {
-		funder: ctx.wallet.publicKey,
-		owner: ctx.wallet.publicKey,
+		funder: wallet.publicKey,
+		owner: wallet.publicKey,
 		positionPda: positionPDAddress,
 		positionMintAddress: positionMintKeypair.publicKey,
 		positionTokenAccount: positionATAddress,
-		whirlpool: whirlpoolAddress,
+		whirlpool: WHIRLPOOL_ADDRESS,
 		tickLowerIndex,
 		tickUpperIndex,
 	})
@@ -198,7 +247,6 @@ const buildCreatePositionIx = ({
 
 type BuildDepositLiquidityIxParams = {
 	whirlpoolData: WhirlpoolData
-	whirlpoolAddress: PublicKey
 	tickLowerIndex: number
 	tickUpperIndex: number
 	liquidityInput: IncreaseLiquidityInput
@@ -207,7 +255,6 @@ type BuildDepositLiquidityIxParams = {
 }
 
 const buildDepositLiquidityIx = async ({
-	whirlpoolAddress,
 	whirlpoolData,
 	tickLowerIndex,
 	tickUpperIndex,
@@ -216,64 +263,17 @@ const buildDepositLiquidityIx = async ({
 	positionATAddress,
 }: BuildDepositLiquidityIxParams) => {
 	const instructions: TransactionInstruction[] = []
-	const cleanupInstructions: TransactionInstruction[] = []
-
-	const mints = [
-		{
-			mint: whirlpoolData.tokenMintA,
-			ATAddress: getAssociatedTokenAddressSync(whirlpoolData.tokenMintA, ctx.wallet.publicKey),
-		},
-		{
-			mint: whirlpoolData.tokenMintB,
-			ATAddress: getAssociatedTokenAddressSync(whirlpoolData.tokenMintB, ctx.wallet.publicKey),
-		},
-	]
-
-	// Create WSOL ATA if needed
-	for (const { mint, ATAddress } of mints) {
-		console.log(mint.toString())
-		if (!mint.equals(SOL_MINT)) {
-			continue
-		}
-		console.log('Fetching acc')
-		const ATAccountInfo = await retryOnThrow(() => connection.getAccountInfo(ATAddress))
-		if (!ATAccountInfo || !ATAccountInfo.data) {
-			instructions.push(
-				createAssociatedTokenAccountInstruction(
-					ctx.wallet.publicKey,
-					ATAddress,
-					ctx.wallet.publicKey,
-					mint,
-				),
-			)
-			cleanupInstructions.push(
-				createCloseAccountInstruction(ATAddress, ctx.wallet.publicKey, ctx.wallet.publicKey),
-			)
-		}
-	}
-
-	// Transfer SOL to WSOL ATA
-	if (mints[0].mint.equals(SOL_MINT)) {
-		instructions.push(
-			SystemProgram.transfer({
-				fromPubkey: ctx.wallet.publicKey,
-				toPubkey: mints[0].ATAddress,
-				lamports: liquidityInput.tokenMaxA.toNumber(),
-			}),
-			createSyncNativeInstruction(mints[0].ATAddress),
-		)
-	}
 
 	const tickArrayLower = PDAUtil.getTickArrayFromTickIndex(
 		tickLowerIndex,
 		whirlpoolData.tickSpacing,
-		whirlpoolAddress,
+		WHIRLPOOL_ADDRESS,
 		ORCA_WHIRLPOOL_PROGRAM_ID,
 	)
 	const tickArrayUpper = PDAUtil.getTickArrayFromTickIndex(
 		tickUpperIndex,
 		whirlpoolData.tickSpacing,
-		whirlpoolAddress,
+		WHIRLPOOL_ADDRESS,
 		ORCA_WHIRLPOOL_PROGRAM_ID,
 	)
 
@@ -281,12 +281,12 @@ const buildDepositLiquidityIx = async ({
 		liquidityAmount: liquidityInput.liquidityAmount,
 		tokenMaxA: liquidityInput.tokenMaxA,
 		tokenMaxB: liquidityInput.tokenMaxB,
-		whirlpool: whirlpoolAddress,
+		whirlpool: WHIRLPOOL_ADDRESS,
 		positionAuthority: ctx.wallet.publicKey,
 		position: positionPDAddress,
 		positionTokenAccount: positionATAddress,
-		tokenOwnerAccountA: mints[0].ATAddress,
-		tokenOwnerAccountB: mints[1].ATAddress,
+		tokenOwnerAccountA: tokenA.ATAddress,
+		tokenOwnerAccountB: tokenB.ATAddress,
 		tokenVaultA: whirlpoolData.tokenVaultA,
 		tokenVaultB: whirlpoolData.tokenVaultB,
 		tickArrayLower: tickArrayLower.publicKey,
@@ -294,22 +294,17 @@ const buildDepositLiquidityIx = async ({
 	})
 	instructions.push(...depositLiquidityIxs)
 
-	return {
-		instructions,
-		cleanupInstructions,
-	}
+	return instructions
 }
 
 type OpenPositionParams = {
 	whirlpoolData: WhirlpoolData
-	whirlpoolAddress: PublicKey
 	upperBoundaryPrice: number
 	lowerBoundaryPrice: number
 }
 
 export const openPosition = async ({
 	whirlpoolData,
-	whirlpoolAddress,
 	upperBoundaryPrice,
 	lowerBoundaryPrice,
 }: OpenPositionParams) => {
@@ -318,11 +313,7 @@ export const openPosition = async ({
 		whirlpoolData.tickCurrentIndex,
 		whirlpoolData.tickSpacing,
 	)
-	const tickArrayPda = PDAUtil.getTickArray(
-		ORCA_WHIRLPOOL_PROGRAM_ID,
-		SOL_USDC_WHIRLPOOL_ADDRESS,
-		startTick,
-	)
+	const tickArrayPda = PDAUtil.getTickArray(ORCA_WHIRLPOOL_PROGRAM_ID, WHIRLPOOL_ADDRESS, startTick)
 	const tickArrayAccount = await retryOnThrow(() =>
 		fetcher.getTickArray(tickArrayPda.publicKey, true),
 	)
@@ -332,8 +323,8 @@ export const openPosition = async ({
 		const ix = WhirlpoolIx.initTickArrayIx(ctx.program, {
 			startTick,
 			tickArrayPda,
-			whirlpool: whirlpoolAddress,
-			funder: provider.wallet.publicKey,
+			whirlpool: WHIRLPOOL_ADDRESS,
+			funder: wallet.publicKey,
 		})
 		tx.add(...ix.instructions)
 
@@ -341,47 +332,35 @@ export const openPosition = async ({
 		await sendTxAndRetryOnFail(tx)
 	}
 
-	const tokenAMint = whirlpoolData.tokenMintA
-	const tokenBMint = whirlpoolData.tokenMintB
-
 	// Calculate boundaries ticks
-	const { tickUpperIndex, tickLowerIndex } = getBoundariesTicks({
+	const { tickUpperIndex, tickLowerIndex } = getBoundariesTickIndexes({
 		upperBoundary: upperBoundaryPrice,
 		lowerBoundary: lowerBoundaryPrice,
 		tickSpacing: whirlpoolData.tickSpacing,
-		tokenAMint,
-		tokenBMint,
+		tokenAMint: tokenA.mint,
+		tokenBMint: tokenB.mint,
 	})
 
 	// Get deposit amounts
-	const increaseLiquidityInput = increaseLiquidityQuoteByInputTokenWithParams({
-		inputTokenMint: tokenBMint,
-		inputTokenAmount: new BN(Math.floor((POSITION_SIZE_UI / 2) * 10 ** 6)),
-		slippageTolerance: SLIPPAGE_TOLERANCE,
+	const inputLiqData = await calculateInputLiquidity({
 		tickLowerIndex,
 		tickUpperIndex,
-		...whirlpoolData,
+		whirlpoolData,
 	})
 
 	// Execute swaps to match balances with tokenEstA and tokenEstB with 0.08 SOL as a remainder
-	const balances = await getWhirlpoolATAccountsBalances({
-		tokenAMint,
-		tokenBMint,
-	})
+	const balances = await getWhirlpoolATAccountsBalances()
 
-	const { tokenEstA, tokenEstB } = increaseLiquidityInput
-	const swapParams = calculateSwapAmounts(
-		{ tokenA: tokenAMint, tokenB: tokenBMint },
-		{ tokenA: tokenEstA.toNumber(), tokenB: tokenEstB.toNumber() },
-		balances,
-	)
-	if (swapParams) {
-		console.log(
-			'Need to swap:\n' +
-				` ${swapParams.inputMint.toString()} for ${swapParams.outputMint.toString()}\n` +
-				` Amount: ${swapParams.amountRaw}, mode: ${swapParams.swapMode}`,
-		)
-		await executeJupiterSwap(swapParams)
+	const swapsParams = getRequiredSwapsParams(balances, inputLiqData)
+	if (swapsParams) {
+		for (const swapParams of swapsParams) {
+			console.log(
+				'Need to swap:\n' +
+					` ${swapParams.inputMint.toString()} for ${swapParams.outputMint.toString()}\n` +
+					` Amount: ${swapParams.amountRaw}, mode: ${swapParams.swapMode}`,
+			)
+			await executeJupiterSwap(swapParams)
+		}
 	}
 
 	// Create position
@@ -392,30 +371,31 @@ export const openPosition = async ({
 		signers: _signers,
 		position,
 	} = buildCreatePositionIx({
-		whirlpoolAddress,
 		tickLowerIndex,
 		tickUpperIndex,
 	})
 	tx.add(createPositionIx)
 
-	// Deposit liquidity
-	const { instructions: depositLiquidityIxs, cleanupInstructions } = await buildDepositLiquidityIx({
-		liquidityInput: increaseLiquidityInput,
+	const { setupInstructions, cleanupInstructions } =
+		await buildCreateAndCloseATAccountsInstructions([tokenA, tokenB])
+	const wrapSolIxs = buildWrapSolInstruction(inputLiqData.liqInput)
+
+	const depositLiquidityIxs = await buildDepositLiquidityIx({
+		liquidityInput: inputLiqData.liqInput,
 		positionATAddress: position.ATAddress,
 		positionPDAddress: position.PDAddress,
-		whirlpoolAddress,
 		whirlpoolData,
 		tickLowerIndex,
 		tickUpperIndex,
 	})
-	tx.add(...depositLiquidityIxs, ...cleanupInstructions)
+	tx.add(...setupInstructions, ...wrapSolIxs, ...depositLiquidityIxs, ...cleanupInstructions)
 
 	console.log('Opening position and depositing liquidity')
 	const meta = await sendTxAndRetryOnFail(tx, _signers)
 	console.log('Successfully deposited liquidity')
 
 	const postTxBalances = parsePostTransactionBalances({
-		mints: [SOL_MINT, USDC_MINT],
+		mints: [tokenA.mint, tokenB.mint],
 		meta,
 	})
 

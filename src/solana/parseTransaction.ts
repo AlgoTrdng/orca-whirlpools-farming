@@ -1,6 +1,7 @@
 import { ConfirmedTransactionMeta, PublicKey, TokenBalance } from '@solana/web3.js'
 
 import { SOL_MINT } from '../constants.js'
+import { wallet } from '../global.js'
 
 const assert = (condition: boolean, err: string) => {
 	if (!condition) {
@@ -10,7 +11,9 @@ const assert = (condition: boolean, err: string) => {
 
 const findTokenBalance = (mint: PublicKey, postTokenBalances: TokenBalance[]) =>
 	// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-	postTokenBalances.find(({ mint: _mint }) => mint.toString() === _mint)!.uiTokenAmount.amount
+	postTokenBalances.find(
+		({ mint: _mint, owner }) => mint.toString() === _mint && owner === wallet.publicKey.toString(),
+	)!.uiTokenAmount.amount
 
 type ParseTransactionParams = {
 	meta: ConfirmedTransactionMeta

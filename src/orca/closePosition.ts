@@ -1,5 +1,6 @@
 import {
 	CollectFeesParams,
+	CollectRewardsQuote,
 	collectRewardsQuote,
 	decreaseLiquidityQuoteByLiquidityWithParams,
 	ORCA_WHIRLPOOL_PROGRAM_ID,
@@ -11,20 +12,18 @@ import {
 	WhirlpoolData,
 	WhirlpoolIx,
 } from '@orca-so/whirlpools-sdk'
-import {
-	createAssociatedTokenAccountInstruction,
-	getAssociatedTokenAddressSync,
-	createCloseAccountInstruction,
-} from '@solana/spl-token'
+import { getAssociatedTokenAddressSync } from '@solana/spl-token'
 import { PublicKey, Transaction, TransactionInstruction } from '@solana/web3.js'
 import { setTimeout } from 'node:timers/promises'
 
-import { SLIPPAGE_TOLERANCE, SOL_MINT, SOL_USDC_WHIRLPOOL_ADDRESS } from '../constants.js'
-import { connection, ctx, fetcher, solATAddress, usdcATAddress } from '../global.js'
+import { WHIRLPOOL_ADDRESS } from '../config.js'
+import { SLIPPAGE_TOLERANCE } from '../constants.js'
+import { connection, ctx, fetcher, tokenA, tokenB, wallet } from '../global.js'
 import { sendAndConfirmTransaction, TransactionResponseStatus } from '../solana/sendTransaction.js'
+import { buildCreateAndCloseATAccountsInstructions, TokenData } from '../utils/ATAccounts.js'
 import { retryOnThrow } from '../utils/retryOnThrow.js'
 import { addBlockHashAndSign } from '../utils/sendTxAndRetryOnFail.js'
-import { getWhirlpoolData } from './getPool.js'
+import { getWhirlpoolData } from './pool.js'
 
 type GetTickDataParams = {
 	upper: PublicKey
@@ -68,10 +67,58 @@ const getTickData = async ({
 	}
 }
 
+type BuildCollectRewardsIxParams = {
+	position: PositionData
+	positionAddress: PublicKey
+	positionATAddress: PublicKey
+	whirlpoolData: WhirlpoolData
+	rewardsData: CollectRewardsQuote
+}
+
+const buildCollectRewardsIx = async ({
+	position,
+	positionATAddress,
+	positionAddress,
+	whirlpoolData,
+	rewardsData,
+}: BuildCollectRewardsIxParams) => {
+	const tokensData: TokenData[] = []
+	const mainInstructions: TransactionInstruction[] = []
+
+	whirlpoolData.rewardInfos.forEach(({ vault, mint }, i) => {
+		const rewardAmount = rewardsData[i]?.toNumber() || 0
+		if (!rewardAmount) {
+			return
+		}
+
+		const ATAddress = getAssociatedTokenAddressSync(mint, wallet.publicKey)
+		tokensData.push({ mint, ATAddress })
+
+		const { instructions: collectRewardIxs } = WhirlpoolIx.collectRewardIx(ctx.program, {
+			whirlpool: position.whirlpool,
+			positionAuthority: wallet.publicKey,
+			position: positionAddress,
+			positionTokenAccount: positionATAddress,
+			rewardOwnerAccount: tokensData[i].ATAddress,
+			rewardVault: vault,
+			rewardIndex: i,
+		})
+		mainInstructions.push(...collectRewardIxs)
+	})
+
+	const { setupInstructions, cleanupInstructions } =
+		await buildCreateAndCloseATAccountsInstructions(tokensData)
+
+	return {
+		setupInstructions,
+		mainInstructions,
+		cleanupInstructions,
+	}
+}
+
 type BuildDecreaseLiquidityIxParams = {
 	whirlpoolData: WhirlpoolData
 	position: PositionData
-	whirlpoolAddress: PublicKey
 	refetch: boolean
 	accounts: CollectFeesParams
 	tickLowerArrayAddress: PublicKey
@@ -81,13 +128,12 @@ type BuildDecreaseLiquidityIxParams = {
 const buildDecreaseLiquidityIx = async ({
 	whirlpoolData: _whirlpoolData,
 	position,
-	whirlpoolAddress,
 	refetch,
 	accounts,
 	tickLowerArrayAddress,
 	tickUpperArrayAddress,
 }: BuildDecreaseLiquidityIxParams) => {
-	const whirlpoolData = refetch ? await getWhirlpoolData(whirlpoolAddress) : _whirlpoolData
+	const whirlpoolData = refetch ? await getWhirlpoolData() : _whirlpoolData
 	const decreaseLiquidityQuote = decreaseLiquidityQuoteByLiquidityWithParams({
 		liquidity: position.liquidity,
 		slippageTolerance: SLIPPAGE_TOLERANCE,
@@ -110,17 +156,15 @@ const buildDecreaseLiquidityIx = async ({
 type ClosePositionParams = {
 	positionAddress: PublicKey
 	whirlpoolData: WhirlpoolData
-	whirlpoolAddress: PublicKey
 	refetch: boolean
 }
 
 export const closePosition = async ({
 	whirlpoolData: _whirlpoolData,
 	positionAddress,
-	whirlpoolAddress,
 	refetch,
 }: ClosePositionParams): Promise<void> => {
-	const whirlpoolData = refetch ? await getWhirlpoolData(whirlpoolAddress) : _whirlpoolData
+	const whirlpoolData = refetch ? await getWhirlpoolData() : _whirlpoolData
 	const position = await retryOnThrow(() => fetcher.getPosition(positionAddress, true))
 
 	if (!position) {
@@ -131,17 +175,15 @@ export const closePosition = async ({
 	const { publicKey: tickLowerArrayAddress } = PDAUtil.getTickArrayFromTickIndex(
 		position.tickLowerIndex,
 		whirlpoolData.tickSpacing,
-		SOL_USDC_WHIRLPOOL_ADDRESS,
+		WHIRLPOOL_ADDRESS,
 		ORCA_WHIRLPOOL_PROGRAM_ID,
 	)
 	const { publicKey: tickUpperArrayAddress } = PDAUtil.getTickArrayFromTickIndex(
 		position.tickUpperIndex,
 		whirlpoolData.tickSpacing,
-		SOL_USDC_WHIRLPOOL_ADDRESS,
+		WHIRLPOOL_ADDRESS,
 		ORCA_WHIRLPOOL_PROGRAM_ID,
 	)
-
-	const instructions: TransactionInstruction[] = []
 
 	// Update on chain fees and rewards
 	const { instructions: updateFeesAndRewardsIxs } = WhirlpoolIx.updateFeesAndRewardsIx(
@@ -154,27 +196,18 @@ export const closePosition = async ({
 		},
 	)
 
-	instructions[0] = updateFeesAndRewardsIxs[0]
-	// TODO: Check if both accounts exist and create accounts depending on result
-	instructions[1] = createAssociatedTokenAccountInstruction(
-		ctx.wallet.publicKey,
-		solATAddress,
-		ctx.wallet.publicKey,
-		SOL_MINT,
-	)
+	const { setupInstructions, cleanupInstructions } =
+		await buildCreateAndCloseATAccountsInstructions([tokenA, tokenB])
 
 	// Create collect fees ix
-	const positionATAddress = getAssociatedTokenAddressSync(
-		position.positionMint,
-		ctx.wallet.publicKey,
-	)
+	const positionATAddress = getAssociatedTokenAddressSync(position.positionMint, wallet.publicKey)
 	const collectFeesIxAccounts: CollectFeesParams = {
 		whirlpool: position.whirlpool,
-		positionAuthority: ctx.wallet.publicKey,
+		positionAuthority: wallet.publicKey,
 		position: positionAddress,
 		positionTokenAccount: positionATAddress,
-		tokenOwnerAccountA: solATAddress,
-		tokenOwnerAccountB: usdcATAddress,
+		tokenOwnerAccountA: tokenA.ATAddress,
+		tokenOwnerAccountB: tokenB.ATAddress,
 		tokenVaultA: whirlpoolData.tokenVaultA,
 		tokenVaultB: whirlpoolData.tokenVaultB,
 	}
@@ -182,7 +215,6 @@ export const closePosition = async ({
 		ctx.program,
 		collectFeesIxAccounts,
 	)
-	instructions[2] = collectFeesIx[0]
 
 	// Check and create if needed collect rewards ix
 	const { tickLower, tickUpper } = await getTickData({
@@ -193,38 +225,20 @@ export const closePosition = async ({
 		tickSpacing: whirlpoolData.tickSpacing,
 	})
 
-	const rewardQuote = collectRewardsQuote({
+	const rewardsData = collectRewardsQuote({
 		whirlpool: whirlpoolData,
 		position,
 		tickLower,
 		tickUpper,
 	})
 
-	for (let i = 0; i < rewardQuote.length; i++) {
-		const rewardAmount = rewardQuote[i]?.toNumber() || 0
-		if (!rewardAmount) {
-			continue
-		}
-		const rewardTokenMint = whirlpoolData.rewardInfos[i].mint
-		if (!rewardTokenMint) {
-			continue
-		}
-		const rewardTokenATAddress = getAssociatedTokenAddressSync(
-			rewardTokenMint,
-			ctx.wallet.publicKey,
-		)
-		// TODO: Create token account if it does not exist
-		const { instructions: collectRewardIxs } = WhirlpoolIx.collectRewardIx(ctx.program, {
-			whirlpool: position.whirlpool,
-			positionAuthority: ctx.wallet.publicKey,
-			position: positionAddress,
-			positionTokenAccount: positionATAddress,
-			rewardOwnerAccount: rewardTokenATAddress,
-			rewardVault: whirlpoolData.rewardInfos[i].vault,
-			rewardIndex: i,
-		})
-		instructions[3 + i] = collectRewardIxs[0]
-	}
+	const rewardsIxs = await buildCollectRewardsIx({
+		position,
+		positionAddress,
+		positionATAddress,
+		whirlpoolData,
+		rewardsData,
+	})
 
 	// Withdraw all liquidity
 	let decreaseLiquidityIx = await buildDecreaseLiquidityIx({
@@ -232,30 +246,35 @@ export const closePosition = async ({
 		refetch: false,
 		whirlpoolData,
 		position,
-		whirlpoolAddress,
 		tickLowerArrayAddress,
 		tickUpperArrayAddress,
 	})
-	instructions[6] = decreaseLiquidityIx
 
 	const { instructions: closePositionIx } = WhirlpoolIx.closePositionIx(ctx.program, {
-		positionAuthority: ctx.wallet.publicKey,
-		receiver: ctx.wallet.publicKey,
+		positionAuthority: wallet.publicKey,
+		receiver: wallet.publicKey,
 		positionTokenAccount: positionATAddress,
 		position: positionAddress,
 		positionMint: position.positionMint,
 	})
 
-	instructions[7] = closePositionIx[0]
-	instructions[8] = createCloseAccountInstruction(
-		solATAddress,
-		ctx.wallet.publicKey,
-		ctx.wallet.publicKey,
-	)
+	const buildTx = async () => {
+		const tx = new Transaction()
+		tx.add(
+			...updateFeesAndRewardsIxs,
+			...setupInstructions,
+			...collectFeesIx,
+			...rewardsIxs.setupInstructions,
+			...rewardsIxs.mainInstructions,
+			decreaseLiquidityIx,
+			...closePositionIx,
+			...rewardsIxs.cleanupInstructions,
+			...cleanupInstructions,
+		)
+		return addBlockHashAndSign({ tx, version: 'legacy' })
+	}
 
-	let tx = new Transaction()
-	tx.add(...instructions.filter((ix) => !!ix))
-	await addBlockHashAndSign(tx)
+	let tx = await buildTx()
 
 	while (true) {
 		const res = await sendAndConfirmTransaction(tx)
@@ -264,7 +283,7 @@ export const closePosition = async ({
 				return
 			}
 			case TransactionResponseStatus.BLOCK_HEIGHT_EXCEEDED: {
-				return closePosition({ positionAddress, whirlpoolAddress, whirlpoolData, refetch: true })
+				return closePosition({ positionAddress, whirlpoolData, refetch: true })
 			}
 			case TransactionResponseStatus.ERROR: {
 				if (typeof res.error !== 'string' && 'InstructionError' in res.error) {
@@ -273,16 +292,12 @@ export const closePosition = async ({
 						decreaseLiquidityIx = await buildDecreaseLiquidityIx({
 							accounts: collectFeesIxAccounts,
 							refetch: true,
-							whirlpoolAddress,
 							whirlpoolData,
 							tickLowerArrayAddress,
 							tickUpperArrayAddress,
 							position,
 						})
-						instructions[6] = decreaseLiquidityIx
-						tx = new Transaction()
-						tx.add(...instructions.filter((ix) => !!ix))
-						await addBlockHashAndSign(tx)
+						tx = await buildTx()
 					}
 				}
 			}

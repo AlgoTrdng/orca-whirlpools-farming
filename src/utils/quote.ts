@@ -9,26 +9,27 @@ import {
 import { PublicKey } from '@solana/web3.js'
 import BN from 'bn.js'
 
-import { RANGE_SPACING_BPS, SLIPPAGE_TOLERANCE } from '../constants.js'
-import { connection } from '../global.js'
+import { WHIRLPOOL_ADDRESS } from '../config.js'
+import { SLIPPAGE_TOLERANCE } from '../constants.js'
+import { connection, lowerBoundaryBps, tokenA, tokenB, upperBoundaryBps } from '../global.js'
 import { retryOnThrow } from './retryOnThrow.js'
 
-const getTickArrayAccounts = async (whirlpool: WhirlpoolData, whirlpoolAddress: PublicKey) => {
-	// A to B (SOL to USDC) = true
+const getTickArrayAccounts = async (whirlpool: WhirlpoolData) => {
+	// A to B = true
 	const aToBAccounts = SwapUtils.getTickArrayPublicKeys(
 		whirlpool.tickCurrentIndex,
 		whirlpool.tickSpacing,
 		true,
 		ORCA_WHIRLPOOL_PROGRAM_ID,
-		whirlpoolAddress,
+		WHIRLPOOL_ADDRESS,
 	)
-	// B to A (USDC to SOL) = false
+	// B to A = false
 	const bToAAccounts = SwapUtils.getTickArrayPublicKeys(
 		whirlpool.tickCurrentIndex,
 		whirlpool.tickSpacing,
 		false,
 		ORCA_WHIRLPOOL_PROGRAM_ID,
-		whirlpoolAddress,
+		WHIRLPOOL_ADDRESS,
 	)
 
 	// Filter duplicates so we fetch each account only once
@@ -71,10 +72,8 @@ const getTickArrayAccounts = async (whirlpool: WhirlpoolData, whirlpoolAddress: 
 	return tickArrayAccountsInfos
 }
 
-// 1 SOL
-const A_TO_B_INPUT_AMOUNT_BN = new BN(1_000_000_000)
-// 1 USDC
-const B_TO_A_INPUT_AMOUNT_BN = new BN(1_000_000)
+const A_TO_B_INPUT_AMOUNT_BN = new BN(1 * 10 ** tokenA.decimals)
+const B_TO_A_INPUT_AMOUNT_BN = new BN(1 * 10 ** tokenB.decimals)
 
 type GetQuoteParams = {
 	whirlpoolData: WhirlpoolData
@@ -99,45 +98,40 @@ const getQuote = ({ whirlpoolData, tickArrays, aToB }: GetQuoteParams) => {
 	)
 
 	if (aToB) {
-		return estimatedAmountOut.toNumber() / 10 ** 6
+		return estimatedAmountOut.toNumber() / 10 ** tokenB.decimals
 	}
 
-	const outAmountUi = estimatedAmountOut.toNumber() / 10 ** 9
+	const outAmountUi = estimatedAmountOut.toNumber() / 10 ** tokenA.decimals
 	const price = 1 / outAmountUi
 	return price
 }
 
-type GetQuoteWithBoundariesParams = {
-	whirlpoolData: WhirlpoolData
-	whirlpoolAddress: PublicKey
-}
+const round = (amount: number, decimals: number) =>
+	Math.round(amount * 10 ** decimals) / 10 ** decimals
 
 /**
  * Get avg price for 1 unit A to B swap and 1 unit B to A swap
  */
-export const getQuoteWithBoundaries = async ({
-	whirlpoolData,
-	whirlpoolAddress,
-}: GetQuoteWithBoundariesParams) => {
-	const tickArrayAccounts = await getTickArrayAccounts(whirlpoolData, whirlpoolAddress)
+export const getQuoteInTokenBWithBoundaries = async (whirlpoolData: WhirlpoolData) => {
+	const tickArrayAccounts = await getTickArrayAccounts(whirlpoolData)
 
-	// A to B (SOL to USDC) = true
+	// A to B = true
 	const aToBPrice = getQuote({
 		whirlpoolData,
 		tickArrays: tickArrayAccounts.aToB,
 		aToB: true,
 	})
-	// B to A (USDC to SOL) = false
+	// B to A = false
 	const bToAPrice = getQuote({
 		whirlpoolData,
 		tickArrays: tickArrayAccounts.bToA,
 		aToB: false,
 	})
 
-	const avgPrice = Math.round(((aToBPrice + bToAPrice) / 2) * 10 ** 6) / 10 ** 6
+	const avgPrice = round((aToBPrice + bToAPrice) / 2, tokenB.decimals)
 
-	const lowerBoundary = aToBPrice * (1 - RANGE_SPACING_BPS)
-	const higherBoundary = bToAPrice * (1 + RANGE_SPACING_BPS)
+	const lowerBoundary = round(aToBPrice * (1 - lowerBoundaryBps), tokenB.decimals)
+	const higherBoundary = round(bToAPrice * (1 + upperBoundaryBps), tokenB.decimals)
 
 	return {
 		price: avgPrice,

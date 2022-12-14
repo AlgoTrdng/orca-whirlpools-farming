@@ -2,40 +2,48 @@ import { ORCA_WHIRLPOOL_PROGRAM_ID, PDAUtil } from '@orca-so/whirlpools-sdk'
 import { PublicKey } from '@solana/web3.js'
 import { setTimeout } from 'node:timers/promises'
 
-import { USDC_MINT, SOL_USDC_WHIRLPOOL_ADDRESS, SOL_MINT, MIN_SOL_AMOUNT_RAW } from './constants.js'
+import { USDC_MINT, SOL_MINT, MIN_SOL_AMOUNT_RAW } from './constants.js'
 import { closePosition } from './orca/closePosition.js'
-import { getWhirlpoolData } from './orca/getPool.js'
+import { getWhirlpoolData } from './orca/pool.js'
 import { openPosition } from './orca/openPosition.js'
 import { state } from './state.js'
 import { executeJupiterSwap } from './utils/jupiter.js'
-import { getQuoteWithBoundaries } from './utils/quote.js'
+import { getQuoteInTokenBWithBoundaries } from './utils/quote.js'
+import { lowerBoundaryBps, tokenA, tokenB, upperBoundaryBps } from './global.js'
 
 const wait = () => setTimeout(60_000)
 
 const swapRemainingSol = async (balances: Map<PublicKey, number>) => {
-	const solBalance = balances.get(SOL_MINT)
-	const overflowAmount = Number(solBalance) - MIN_SOL_AMOUNT_RAW
-	if (overflowAmount > MIN_SOL_AMOUNT_RAW * 1.4) {
-		console.log(`Swapping overflow SOL amount to USDC: ${overflowAmount}`)
-		await executeJupiterSwap({
-			inputMint: SOL_MINT,
-			outputMint: USDC_MINT,
-			amountRaw: overflowAmount,
-			swapMode: 'ExactIn',
-		})
+	const execute = async (mint: PublicKey) => {
+		const tokenBalance = balances.get(mint)
+
+		if (!mint.equals(USDC_MINT) && tokenBalance) {
+			const minAmount = mint.equals(SOL_MINT) ? MIN_SOL_AMOUNT_RAW : 0
+			const overflowAmount = tokenBalance - minAmount
+			if (overflowAmount > minAmount * 1.4) {
+				console.log(`Swapping overflow ${mint.toString()} amount to USDC: ${overflowAmount}`)
+				await executeJupiterSwap({
+					inputMint: mint,
+					outputMint: USDC_MINT,
+					amountRaw: overflowAmount,
+					swapMode: 'ExactIn',
+				})
+			}
+		}
 	}
+
+	await execute(tokenA.mint)
+	await execute(tokenB.mint)
 }
 
 // INIT
 // Open position
 if (!state.data?.position) {
-	const whirlpoolData = await getWhirlpoolData(SOL_USDC_WHIRLPOOL_ADDRESS)
-	const { higherBoundary, lowerBoundary, price } = await getQuoteWithBoundaries({
-		whirlpoolAddress: SOL_USDC_WHIRLPOOL_ADDRESS,
-		whirlpoolData: whirlpoolData,
-	})
+	const whirlpoolData = await getWhirlpoolData()
+	const { higherBoundary, lowerBoundary, price } = await getQuoteInTokenBWithBoundaries(
+		whirlpoolData,
+	)
 	const { positionMint, balances } = await openPosition({
-		whirlpoolAddress: SOL_USDC_WHIRLPOOL_ADDRESS,
 		whirlpoolData: whirlpoolData,
 		upperBoundaryPrice: higherBoundary,
 		lowerBoundaryPrice: lowerBoundary,
@@ -57,11 +65,10 @@ if (!state.data?.position) {
 
 // WATCH
 while (true) {
-	const whirlpoolData = await getWhirlpoolData(SOL_USDC_WHIRLPOOL_ADDRESS)
-	const { price, higherBoundary, lowerBoundary } = await getQuoteWithBoundaries({
-		whirlpoolAddress: SOL_USDC_WHIRLPOOL_ADDRESS,
+	const whirlpoolData = await getWhirlpoolData()
+	const { price, higherBoundary, lowerBoundary } = await getQuoteInTokenBWithBoundaries(
 		whirlpoolData,
-	})
+	)
 
 	const position = state.data.position!
 
@@ -73,7 +80,10 @@ while (true) {
 	)
 
 	// Check if current is in bounds
-	if (position.openPrice * 0.98 < price && position.openPrice * 1.02 > price) {
+	if (
+		position.openPrice * (1 - 0.9 * lowerBoundaryBps) < price &&
+		position.openPrice * (1 + 0.9 * upperBoundaryBps) > price
+	) {
 		await wait()
 		continue
 	}
@@ -81,7 +91,6 @@ while (true) {
 	// Close position
 	await closePosition({
 		positionAddress: position.address,
-		whirlpoolAddress: SOL_USDC_WHIRLPOOL_ADDRESS,
 		refetch: false,
 		whirlpoolData,
 	})
@@ -90,8 +99,7 @@ while (true) {
 	const { positionMint, balances } = await openPosition({
 		upperBoundaryPrice: higherBoundary,
 		lowerBoundaryPrice: lowerBoundary,
-		whirlpoolAddress: SOL_USDC_WHIRLPOOL_ADDRESS,
-		whirlpoolData: await getWhirlpoolData(SOL_USDC_WHIRLPOOL_ADDRESS),
+		whirlpoolData: await getWhirlpoolData(),
 	})
 	const positionPDAddress = PDAUtil.getPosition(ORCA_WHIRLPOOL_PROGRAM_ID, positionMint)
 

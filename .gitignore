@@ -3,3 +3,4 @@ node_modules
 dist
 wallet.json
 db-data.json
+config.json
